@@ -8,6 +8,7 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
+use windows::Media::MediaPlaybackType;
 
 static MEDIA_MANAGER: OnceLock<GlobalSystemMediaTransportControlsSessionManager> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -66,29 +67,74 @@ fn session_is_playing(session: &GlobalSystemMediaTransportControlsSession) -> bo
         .unwrap_or(false)
 }
 
+fn source_is_video_app(source: &str) -> bool {
+    const VIDEO_APP_MARKERS: [&str; 10] = [
+        "bilibili",
+        "哔哩哔哩",
+        "youku",
+        "优酷",
+        "iqiyi",
+        "爱奇艺",
+        "mgtv",
+        "芒果tv",
+        "douyin",
+        "抖音",
+    ];
+    let source = source.to_ascii_lowercase();
+    VIDEO_APP_MARKERS
+        .iter()
+        .any(|marker| source.contains(marker))
+}
+
+fn session_is_music_candidate(session: &GlobalSystemMediaTransportControlsSession) -> bool {
+    let source = session
+        .SourceAppUserModelId()
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    if source_is_video_app(&source) {
+        return false;
+    }
+
+    let playback_type = session
+        .GetPlaybackInfo()
+        .ok()
+        .and_then(|playback| playback.PlaybackType().ok())
+        .and_then(|value| value.Value().ok());
+    !matches!(
+        playback_type,
+        Some(MediaPlaybackType::Video | MediaPlaybackType::Image)
+    )
+}
+
 async fn active_media_session() -> Result<Option<GlobalSystemMediaTransportControlsSession>, String>
 {
     let manager = media_manager().await?;
     let current = manager.GetCurrentSession().ok();
 
-    if current.as_ref().is_some_and(session_is_playing) {
+    if current
+        .as_ref()
+        .is_some_and(|session| session_is_music_candidate(session) && session_is_playing(session))
+    {
         return Ok(current);
     }
 
     let sessions = manager.GetSessions().map_err(error_text)?;
     for index in 0..sessions.Size().map_err(error_text)? {
         let session = sessions.GetAt(index).map_err(error_text)?;
-        if session_is_playing(&session) {
+        if session_is_music_candidate(&session) && session_is_playing(&session) {
             return Ok(Some(session));
         }
     }
 
-    if current.is_some() {
+    if current.as_ref().is_some_and(session_is_music_candidate) {
         return Ok(current);
     }
 
-    if sessions.Size().map_err(error_text)? > 0 {
-        return sessions.GetAt(0).map(Some).map_err(error_text);
+    for index in 0..sessions.Size().map_err(error_text)? {
+        let session = sessions.GetAt(index).map_err(error_text)?;
+        if session_is_music_candidate(&session) {
+            return Ok(Some(session));
+        }
     }
 
     Ok(None)
@@ -238,7 +284,7 @@ async fn fetch_lyrics(
     }
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.1")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -309,6 +355,20 @@ async fn fetch_lyrics(
         matched_title: candidate["songname"].as_str().unwrap_or(&title).to_string(),
         matched_artist,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::source_is_video_app;
+
+    #[test]
+    fn filters_known_video_apps_without_blocking_music_players() {
+        assert!(source_is_video_app("哔哩哔哩.exe"));
+        assert!(source_is_video_app("Bilibili.exe"));
+        assert!(source_is_video_app("iQIYI.Video.exe"));
+        assert!(!source_is_video_app("QQMusic.exe"));
+        assert!(!source_is_video_app("Spotify.exe"));
+    }
 }
 
 #[tauri::command]

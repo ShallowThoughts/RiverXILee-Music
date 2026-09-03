@@ -1,6 +1,6 @@
 [package]
 name = "riverxilee-desktop-lyrics"
-version = "1.0.0"
+version = "1.0.1"
 description = "Transparent multi-platform desktop lyrics overlay for Windows"
 authors = ["RiverXILee"]
 edition = "2024"

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>RiverXILee桌面歌词</title>
+  </head>
+  <body>
+    <svg class="filter-defs" aria-hidden="true">
+      <defs>
+        <filter id="liquid-refraction" x="-12%" y="-28%" width="124%" height="156%" color-interpolation-filters="sRGB">
+          <feTurbulence type="fractalNoise" baseFrequency="0.012 0.055" numOctaves="2" seed="7" result="noise" />
+          <feGaussianBlur in="noise" stdDeviation="0.55" result="softNoise" />
+          <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="18" xChannelSelector="R" yChannelSelector="B" result="red" />
+          <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="15" xChannelSelector="G" yChannelSelector="B" result="green" />
+          <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="12" xChannelSelector="B" yChannelSelector="R" result="blue" />
+          <feOffset in="red" dx="-0.7" result="redOffset" />
+          <feOffset in="blue" dx="0.7" result="blueOffset" />
+          <feBlend in="redOffset" in2="green" mode="screen" result="rg" />
+          <feBlend in="rg" in2="blueOffset" mode="screen" />
+          <feGaussianBlur stdDeviation="0.25" />
+        </filter>
+      </defs>
+    </svg>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

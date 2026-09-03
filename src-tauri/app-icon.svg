@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="140" y1="96" x2="882" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#172426"/>
+      <stop offset="1" stop-color="#05090A"/>
+    </linearGradient>
+    <linearGradient id="light" x1="242" y1="340" x2="794" y2="690" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="0.48" stop-color="#BFFFF0"/>
+      <stop offset="1" stop-color="#67EBCB"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-100%" width="220%" height="300%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+  </defs>
+  <rect x="52" y="52" width="920" height="920" rx="248" fill="url(#background)"/>
+  <rect x="53" y="53" width="918" height="918" rx="247" fill="none" stroke="#FFFFFF" stroke-opacity="0.14" stroke-width="2"/>
+  <path d="M222 424H802" stroke="#72EED1" stroke-opacity="0.22" stroke-width="58" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M222 424H802" stroke="url(#light)" stroke-width="58" stroke-linecap="round"/>
+  <path d="M304 600H720" stroke="#E9FFFA" stroke-opacity="0.58" stroke-width="44" stroke-linecap="round"/>
+  <circle cx="222" cy="424" r="14" fill="#FFFFFF"/>
+</svg>

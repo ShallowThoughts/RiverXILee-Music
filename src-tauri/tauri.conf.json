@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RiverXILee桌面歌词",
+  "version": "1.0.0",
+  "identifier": "top.lxixi.riverxilee-desktop-lyrics",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "RiverXILee桌面歌词",
+        "width": 980,
+        "height": 430,
+        "minWidth": 640,
+        "minHeight": 280,
+        "center": true,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "shortDescription": "透明、现代的多平台桌面歌词",
+    "longDescription": "自动识别 Windows 媒体会话中正在播放的在线歌曲并同步显示歌词。"
+  }
+}

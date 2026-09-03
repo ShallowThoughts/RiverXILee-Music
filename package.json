@@ -1,0 +1,20 @@
+{
+  "name": "riverxilee-desktop-lyrics",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@phosphor-icons/web": "^2.1.2",
+    "@tauri-apps/api": "^2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "vite": "^8.2.1"
+  }
+}

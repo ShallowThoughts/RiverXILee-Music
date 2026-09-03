@@ -295,7 +295,7 @@ async fn fetch_lyrics(
     }
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.1")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.0")
             .build()
             .expect("HTTP client should initialize")
     });

@@ -54,7 +54,8 @@ export function findActiveLine(lines, positionMs) {
 export function lineProgress(lines, activeIndex, positionMs, durationMs) {
   if (activeIndex < 0 || !lines[activeIndex]) return 0;
   const start = lines[activeIndex].timeMs;
-  const end = lines[activeIndex + 1]?.timeMs ?? durationMs ?? start + 5_000;
+  const fallbackEnd = durationMs > start ? durationMs : start + 5_000;
+  const end = lines[activeIndex + 1]?.timeMs ?? fallbackEnd;
   if (end <= start) return 1;
   return Math.min(1, Math.max(0, (positionMs - start) / (end - start)));
 }

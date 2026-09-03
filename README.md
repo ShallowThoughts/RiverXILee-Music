@@ -1,11 +1,11 @@
-# RiverXILee桌面歌词 1.0.2
+# RiverXILee桌面歌词 1.0.0
 
 一个为 Windows 设计的沉浸式透明多平台桌面歌词工具。RiverXILee桌面歌词通过 Windows 系统媒体会话识别当前正在播放的歌曲、播放状态和时间轴，再自动匹配在线歌词，无需本地音频。
 
 ## 下载
 
-- [RiverXILee桌面歌词 1.0.2 安装版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.2/RiverXILee-Desktop-Lyrics_1.0.2_x64-setup.exe)
-- [RiverXILee桌面歌词 1.0.2 便携版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.2/RiverXILee-Desktop-Lyrics_1.0.2_portable.exe)
+- [RiverXILee桌面歌词 1.0.0 安装版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.0/RiverXILee-Desktop-Lyrics_1.0.0_x64-setup.exe)
+- [RiverXILee桌面歌词 1.0.0 便携版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.0/RiverXILee-Desktop-Lyrics_1.0.0_portable.exe)
 
 ## 使用方法
 
@@ -29,6 +29,9 @@
 - 上一首、播放/暂停、下一首控制
 - 透明无边框窗口、始终置顶和全屏
 - 沉浸式五行布局：上两句、当前句、下两句
+- 当前歌词按演唱进度逐字扫色，可切换 RGB 流光或自定义纯色
+- 透明设置面板可调 1～5 行、字号、行间距、上下位置和左右位置
+- 支持取色器及 R/G/B 数值输入，显示设置自动保存
 - 换句时上浮、失焦与聚焦过渡
 - 鼠标穿透锁定与全局快捷键解锁
 - 适合明暗背景的歌词描边、阴影和逐行高亮

@@ -22,8 +22,10 @@ struct MediaSnapshot {
     artist: String,
     album: String,
     is_playing: bool,
+    playback_rate: f64,
     position_ms: i64,
     duration_ms: i64,
+    timeline_updated_at_ms: Option<i64>,
     captured_at_ms: u128,
 }
 
@@ -45,6 +47,12 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+fn timeline_timestamp_ms(winrt_ticks: i64) -> Option<i64> {
+    // WinRT uses 100 ns ticks since 1601; the frontend uses Unix milliseconds.
+    let unix_ms = winrt_ticks / 10_000 - 11_644_473_600_000;
+    (unix_ms > 0).then_some(unix_ms)
 }
 
 async fn media_manager() -> Result<GlobalSystemMediaTransportControlsSessionManager, String> {
@@ -161,8 +169,10 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
             artist: String::new(),
             album: String::new(),
             is_playing: false,
+            playback_rate: 1.0,
             position_ms: 0,
             duration_ms: 0,
+            timeline_updated_at_ms: None,
             captured_at_ms: now_ms(),
         });
     };
@@ -193,8 +203,18 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
         album: properties.AlbumTitle().map_err(error_text)?.to_string(),
         is_playing: playback.PlaybackStatus().map_err(error_text)?
             == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing,
+        playback_rate: playback
+            .PlaybackRate()
+            .ok()
+            .and_then(|value| value.Value().ok())
+            .filter(|rate| rate.is_finite() && *rate >= 0.0)
+            .unwrap_or(1.0),
         position_ms: (timeline.Position().map_err(error_text)?.Duration / 10_000).max(0),
         duration_ms: (timeline.EndTime().map_err(error_text)?.Duration / 10_000).max(0),
+        timeline_updated_at_ms: timeline
+            .LastUpdatedTime()
+            .ok()
+            .and_then(|value| timeline_timestamp_ms(value.UniversalTime)),
         captured_at_ms: now_ms(),
     })
 }
@@ -370,7 +390,18 @@ async fn fetch_lyrics(
 
 #[cfg(test)]
 mod tests {
-    use super::source_is_supported_music_app;
+    use super::{source_is_supported_music_app, timeline_timestamp_ms};
+
+    #[test]
+    fn converts_winrt_timeline_timestamp_to_unix_milliseconds() {
+        let unix_ms = 1_780_000_000_000;
+        assert_eq!(
+            timeline_timestamp_ms((unix_ms + 11_644_473_600_000) * 10_000),
+            Some(unix_ms)
+        );
+        assert_eq!(timeline_timestamp_ms(0), None);
+        assert_eq!(timeline_timestamp_ms(-1), None);
+    }
 
     #[test]
     fn accepts_supported_music_apps() {

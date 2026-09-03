@@ -3,6 +3,7 @@ import "@phosphor-icons/web/fill";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { findActiveLine, lineProgress, parseLrc, visibleLineIndices } from "./lyrics.js";
+import { playbackAnchor, playbackPosition } from "./playback.js";
 import {
   DEFAULT_DISPLAY_SETTINGS,
   hexToRgb,
@@ -32,6 +33,7 @@ const state = {
   artist: "",
   album: "",
   isPlaying: false,
+  playbackRate: 1,
   positionMs: 0,
   durationMs: 0,
   syncedAt: performance.now(),
@@ -256,8 +258,7 @@ function formatTime(milliseconds) {
 }
 
 function estimatedPosition() {
-  const elapsed = state.isPlaying ? performance.now() - state.syncedAt : 0;
-  return Math.min(state.durationMs || Number.MAX_SAFE_INTEGER, state.positionMs + elapsed);
+  return playbackPosition(state, performance.now());
 }
 
 function setButtonIcon(button, iconName, filled = false) {
@@ -375,18 +376,20 @@ async function loadLyrics(snapshot, trackKey) {
   }
 }
 
+let mediaPollInFlight = false;
+
 async function pollMedia() {
-  if (!IS_TAURI) return;
+  if (!IS_TAURI || mediaPollInFlight) return;
+  mediaPollInFlight = true;
   try {
     const snapshot = await invoke("get_media_snapshot");
+    const wasConnected = state.connected;
     state.connected = snapshot.connected;
     state.title = snapshot.title;
     state.artist = snapshot.artist;
     state.album = snapshot.album;
-    state.isPlaying = snapshot.isPlaying;
-    state.positionMs = snapshot.positionMs;
-    state.durationMs = snapshot.durationMs;
-    state.syncedAt = performance.now();
+    Object.assign(state, playbackAnchor(snapshot, performance.now(), Date.now()));
+    if (!wasConnected) state.activeIndex = Number.NaN;
     updateConnectionUi();
 
     const trackKey = snapshot.connected && snapshot.title
@@ -401,9 +404,14 @@ async function pollMedia() {
       else renderLyricWindow(-1);
     }
   } catch (error) {
+    state.positionMs = estimatedPosition();
+    state.syncedAt = performance.now();
+    state.isPlaying = false;
     state.connected = false;
     updateConnectionUi();
     setStageMessage("暂时无法读取播放器", "正在自动重连");
+  } finally {
+    mediaPollInFlight = false;
   }
 }
 
@@ -414,7 +422,7 @@ function animationFrame() {
   const trackProgress = state.durationMs > 0 ? position / state.durationMs : 0;
   elements.progress.style.transform = `scaleX(${Math.min(1, Math.max(0, trackProgress))})`;
 
-  if (state.lyricStatus === "ready") {
+  if (state.connected && state.lyricStatus === "ready") {
     const activeIndex = findActiveLine(state.lines, position);
     if (activeIndex !== state.activeIndex) {
       state.activeIndex = activeIndex;

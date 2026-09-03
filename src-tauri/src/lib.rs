@@ -67,21 +67,32 @@ fn session_is_playing(session: &GlobalSystemMediaTransportControlsSession) -> bo
         .unwrap_or(false)
 }
 
-fn source_is_video_app(source: &str) -> bool {
-    const VIDEO_APP_MARKERS: [&str; 10] = [
-        "bilibili",
-        "哔哩哔哩",
-        "youku",
-        "优酷",
-        "iqiyi",
-        "爱奇艺",
-        "mgtv",
-        "芒果tv",
-        "douyin",
-        "抖音",
+fn source_is_supported_music_app(source: &str) -> bool {
+    const MUSIC_APP_MARKERS: [&str; 21] = [
+        "qqmusic",
+        "qq音乐",
+        "cloudmusic",
+        "neteasemusic",
+        "网易云音乐",
+        "kugou",
+        "酷狗音乐",
+        "kuwomusic",
+        "kuwo",
+        "酷我音乐",
+        "qishuimusic",
+        "qishui",
+        "汽水音乐",
+        "spotify",
+        "applemusic",
+        "itunes",
+        "amazonmusic",
+        "deezer",
+        "tidal",
+        "zunemusic",
+        "musicbee",
     ];
     let source = source.to_ascii_lowercase();
-    VIDEO_APP_MARKERS
+    MUSIC_APP_MARKERS
         .iter()
         .any(|marker| source.contains(marker))
 }
@@ -91,7 +102,7 @@ fn session_is_music_candidate(session: &GlobalSystemMediaTransportControlsSessio
         .SourceAppUserModelId()
         .map(|value| value.to_string())
         .unwrap_or_default();
-    if source_is_video_app(&source) {
+    if !source_is_supported_music_app(&source) {
         return false;
     }
 
@@ -359,15 +370,29 @@ async fn fetch_lyrics(
 
 #[cfg(test)]
 mod tests {
-    use super::source_is_video_app;
+    use super::source_is_supported_music_app;
 
     #[test]
-    fn filters_known_video_apps_without_blocking_music_players() {
-        assert!(source_is_video_app("哔哩哔哩.exe"));
-        assert!(source_is_video_app("Bilibili.exe"));
-        assert!(source_is_video_app("iQIYI.Video.exe"));
-        assert!(!source_is_video_app("QQMusic.exe"));
-        assert!(!source_is_video_app("Spotify.exe"));
+    fn accepts_supported_music_apps() {
+        assert!(source_is_supported_music_app("QQMusic.exe"));
+        assert!(source_is_supported_music_app("cloudmusic.exe"));
+        assert!(source_is_supported_music_app("KuGou.exe"));
+        assert!(source_is_supported_music_app("KuwoMusic.exe"));
+        assert!(source_is_supported_music_app("Spotify.exe"));
+        assert!(source_is_supported_music_app(
+            "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+        ));
+        assert!(source_is_supported_music_app("汽水音乐.exe"));
+    }
+
+    #[test]
+    fn rejects_video_browsers_and_unknown_media_apps() {
+        assert!(!source_is_supported_music_app("Douyin.exe"));
+        assert!(!source_is_supported_music_app("抖音.exe"));
+        assert!(!source_is_supported_music_app("Bilibili.exe"));
+        assert!(!source_is_supported_music_app("chrome.exe"));
+        assert!(!source_is_supported_music_app("msedge.exe"));
+        assert!(!source_is_supported_music_app("UnknownPlayer.exe"));
     }
 }
 

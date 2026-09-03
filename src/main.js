@@ -160,7 +160,7 @@ function renderLyricWindow(activeIndex) {
     return;
   }
   if (!state.connected) {
-    setStageMessage("打开音乐平台开始播放", "自动忽略哔哩哔哩等视频会话");
+    setStageMessage("打开音乐平台开始播放", "仅识别受支持的音乐客户端");
     return;
   }
   if (!state.lines.length) {

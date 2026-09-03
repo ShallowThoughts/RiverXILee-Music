@@ -1,11 +1,11 @@
-# RiverXILee桌面歌词 1.0.1
+# RiverXILee桌面歌词 1.0.2
 
 一个为 Windows 设计的沉浸式透明多平台桌面歌词工具。RiverXILee桌面歌词通过 Windows 系统媒体会话识别当前正在播放的歌曲、播放状态和时间轴，再自动匹配在线歌词，无需本地音频。
 
 ## 下载
 
-- [RiverXILee桌面歌词 1.0.1 安装版](release/RiverXILee桌面歌词_1.0.1_x64-setup.exe)
-- [RiverXILee桌面歌词 1.0.1 便携版](release/RiverXILee桌面歌词_1.0.1.exe)
+- [RiverXILee桌面歌词 1.0.2 安装版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.2/RiverXILee-Desktop-Lyrics_1.0.2_x64-setup.exe)
+- [RiverXILee桌面歌词 1.0.2 便携版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.2/RiverXILee-Desktop-Lyrics_1.0.2_portable.exe)
 
 ## 使用方法
 
@@ -21,9 +21,9 @@
 
 ## 能力
 
-- 自动识别 Windows 媒体会话中当前正在播放的音乐平台
-- 可用于 QQ 音乐、网易云音乐、酷狗音乐、Spotify、Apple Music，以及标记为音乐类型的浏览器播放器
-- 自动忽略 Windows 标记为视频/图像的会话，并额外排除哔哩哔哩等常见视频客户端，避免视频时间轴抢占歌词同步
+- 仅识别音乐客户端白名单中的 Windows 媒体会话，未知来源默认忽略
+- 支持 QQ 音乐、网易云音乐、酷狗音乐、酷我音乐、汽水音乐、Spotify、Apple Music 等主流音乐客户端
+- 自动忽略抖音、哔哩哔哩、浏览器及普通视频播放器，避免视频时间轴抢占或卡住歌词同步
 - 同步播放、暂停和实时时间轴
 - 使用歌名、歌手、专辑和时长自动匹配 QQ 曲库在线 LRC 歌词
 - 上一首、播放/暂停、下一首控制
@@ -42,4 +42,4 @@ npm run tauri dev
 npm run tauri build
 ```
 
-运行环境为 Windows 10/11，使用 Tauri 2、Rust 和原生 Windows GSMTC 媒体接口。平台需要向 Windows 提供媒体会话、歌曲信息和时间轴；个别浏览器网页或播放器隐私模式可能不提供完整信息。
+运行环境为 Windows 10/11，使用 Tauri 2、Rust 和原生 Windows GSMTC 媒体接口。受支持的音乐客户端需要向 Windows 提供媒体会话、歌曲信息和时间轴；浏览器网页和未列入白名单的播放器不会参与同步。

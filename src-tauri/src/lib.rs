@@ -168,6 +168,22 @@ async fn active_media_session() -> Result<Option<GlobalSystemMediaTransportContr
 #[tauri::command]
 async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
     let Some(session) = active_media_session().await? else {
+        let captured_at_ms = now_ms();
+        if let Some(track) = netease::current_track() {
+            return Ok(MediaSnapshot {
+                connected: true,
+                source: "cloudmusic.exe".to_string(),
+                title: track.title,
+                artist: track.artist,
+                album: track.album,
+                is_playing: track.is_playing,
+                playback_rate: 1.0,
+                position_ms: track.position_ms,
+                duration_ms: track.duration_ms,
+                timeline_updated_at_ms: i64::try_from(captured_at_ms).ok(),
+                captured_at_ms,
+            });
+        }
         return Ok(MediaSnapshot {
             connected: false,
             source: String::new(),
@@ -179,7 +195,7 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
             position_ms: 0,
             duration_ms: 0,
             timeline_updated_at_ms: None,
-            captured_at_ms: now_ms(),
+            captured_at_ms,
         });
     };
 

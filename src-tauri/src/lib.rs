@@ -10,6 +10,8 @@ use windows::Media::Control::{
 };
 use windows::Media::MediaPlaybackType;
 
+mod netease;
+
 static MEDIA_MANAGER: OnceLock<GlobalSystemMediaTransportControlsSessionManager> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -53,6 +55,10 @@ fn timeline_timestamp_ms(winrt_ticks: i64) -> Option<i64> {
     // WinRT uses 100 ns ticks since 1601; the frontend uses Unix milliseconds.
     let unix_ms = winrt_ticks / 10_000 - 11_644_473_600_000;
     (unix_ms > 0).then_some(unix_ms)
+}
+
+fn needs_netease_clock(source: &str, position_ms: i64, duration_ms: i64) -> bool {
+    source.to_ascii_lowercase().contains("cloudmusic") && position_ms == 0 && duration_ms == 0
 }
 
 async fn media_manager() -> Result<GlobalSystemMediaTransportControlsSessionManager, String> {
@@ -191,6 +197,20 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
     let artist = properties.Artist().map_err(error_text)?.to_string();
     let album_artist = properties.AlbumArtist().map_err(error_text)?.to_string();
 
+    let captured_at_ms = now_ms();
+    let mut position_ms = (timeline.Position().map_err(error_text)?.Duration / 10_000).max(0);
+    let duration_ms = (timeline.EndTime().map_err(error_text)?.Duration / 10_000).max(0);
+    let mut timeline_updated_at_ms = timeline
+        .LastUpdatedTime()
+        .ok()
+        .and_then(|value| timeline_timestamp_ms(value.UniversalTime));
+    if needs_netease_clock(&source, position_ms, duration_ms) {
+        if let Some(netease_position_ms) = netease::current_position_ms() {
+            position_ms = netease_position_ms;
+            timeline_updated_at_ms = i64::try_from(captured_at_ms).ok();
+        }
+    }
+
     Ok(MediaSnapshot {
         connected: true,
         source,
@@ -207,15 +227,12 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
             .PlaybackRate()
             .ok()
             .and_then(|value| value.Value().ok())
-            .filter(|rate| rate.is_finite() && *rate >= 0.0)
+            .filter(|rate| rate.is_finite() && *rate > 0.0)
             .unwrap_or(1.0),
-        position_ms: (timeline.Position().map_err(error_text)?.Duration / 10_000).max(0),
-        duration_ms: (timeline.EndTime().map_err(error_text)?.Duration / 10_000).max(0),
-        timeline_updated_at_ms: timeline
-            .LastUpdatedTime()
-            .ok()
-            .and_then(|value| timeline_timestamp_ms(value.UniversalTime)),
-        captured_at_ms: now_ms(),
+        position_ms,
+        duration_ms,
+        timeline_updated_at_ms,
+        captured_at_ms,
     })
 }
 
@@ -390,7 +407,7 @@ async fn fetch_lyrics(
 
 #[cfg(test)]
 mod tests {
-    use super::{source_is_supported_music_app, timeline_timestamp_ms};
+    use super::{needs_netease_clock, source_is_supported_music_app, timeline_timestamp_ms};
 
     #[test]
     fn converts_winrt_timeline_timestamp_to_unix_milliseconds() {
@@ -424,6 +441,13 @@ mod tests {
         assert!(!source_is_supported_music_app("chrome.exe"));
         assert!(!source_is_supported_music_app("msedge.exe"));
         assert!(!source_is_supported_music_app("UnknownPlayer.exe"));
+    }
+
+    #[test]
+    fn uses_private_netease_clock_only_when_its_system_timeline_is_empty() {
+        assert!(needs_netease_clock("cloudmusic.exe", 0, 0));
+        assert!(!needs_netease_clock("cloudmusic.exe", 1_000, 200_000));
+        assert!(!needs_netease_clock("QQMusic.exe", 0, 0));
     }
 }
 

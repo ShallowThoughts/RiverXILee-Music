@@ -57,11 +57,10 @@ test("applies playback rate to both timestamp compensation and animation", () =>
   assert.equal(playbackPosition(anchor, 1_100), 69_000);
 });
 
-test("missing and invalid rates default to normal speed while zero stays still", () => {
-  for (const playbackRate of [undefined, null, NaN, Infinity, -1]) {
+test("missing, zero and invalid rates default to normal speed", () => {
+  for (const playbackRate of [undefined, null, 0, NaN, Infinity, -1]) {
     assert.equal(playbackAnchor(snapshot({ playbackRate }), 0, epoch + 5_000).positionMs, 65_000);
   }
-  assert.equal(playbackAnchor(snapshot({ playbackRate: 0 }), 0, epoch + 5_000).positionMs, 60_000);
 });
 
 test("invalid or future timeline timestamps fall back to capture time", () => {

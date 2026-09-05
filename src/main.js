@@ -2,6 +2,7 @@ import "@phosphor-icons/web/regular";
 import "@phosphor-icons/web/fill";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { findActiveLine, lineProgress, parseLrc, visibleLineIndices } from "./lyrics.js";
 import { playbackAnchor, playbackPosition } from "./playback.js";
 import {
@@ -29,6 +30,7 @@ function loadDisplaySettings() {
 
 const state = {
   connected: false,
+  source: "",
   title: "",
   artist: "",
   album: "",
@@ -43,6 +45,8 @@ const state = {
   lyricMessage: "",
   trackKey: "",
   fetchToken: 0,
+  lyricRetryAt: 0,
+  lyricAttempts: 0,
   alwaysOnTop: true,
   fullscreen: false,
   locked: false,
@@ -165,7 +169,10 @@ document.querySelector("#app").innerHTML = `
 
       <div class="settings-footer">
         <span>逐字效果会根据当前歌词行的时间平滑推进</span>
-        <button class="text-button" id="settings-reset-button" type="button">恢复默认</button>
+        <div class="settings-actions">
+          <button class="text-button" id="feedback-button" type="button">问题反馈</button>
+          <button class="text-button" id="settings-reset-button" type="button">恢复默认</button>
+        </div>
       </div>
     </aside>
 
@@ -350,6 +357,7 @@ function updateConnectionUi() {
 
 async function loadLyrics(snapshot, trackKey) {
   const token = ++state.fetchToken;
+  state.lyricAttempts += 1;
   state.lyricStatus = "loading";
   state.lyricMessage = "";
   state.lines = [];
@@ -362,6 +370,8 @@ async function loadLyrics(snapshot, trackKey) {
       artist: snapshot.artist,
       album: snapshot.album,
       durationMs: snapshot.durationMs,
+      source: snapshot.source,
+      trackId: snapshot.trackId || "",
     });
     if (token !== state.fetchToken || trackKey !== state.trackKey) return;
     state.lines = parseLrc(result.lrc);
@@ -371,6 +381,7 @@ async function loadLyrics(snapshot, trackKey) {
   } catch (error) {
     if (token !== state.fetchToken || trackKey !== state.trackKey) return;
     state.lyricStatus = "error";
+    state.lyricRetryAt = performance.now() + 5_000 * state.lyricAttempts;
     state.lyricMessage = String(error).replace(/^.*?: /, "");
     renderLyricWindow(-1);
   }
@@ -385,6 +396,7 @@ async function pollMedia() {
     const snapshot = await invoke("get_media_snapshot");
     const wasConnected = state.connected;
     state.connected = snapshot.connected;
+    state.source = snapshot.source;
     state.title = snapshot.title;
     state.artist = snapshot.artist;
     state.album = snapshot.album;
@@ -393,15 +405,20 @@ async function pollMedia() {
     updateConnectionUi();
 
     const trackKey = snapshot.connected && snapshot.title
-      ? `${snapshot.title}\u0000${snapshot.artist}\u0000${snapshot.durationMs}`
+      ? `${snapshot.source}\u0000${snapshot.trackId || ""}\u0000${snapshot.title}\u0000${snapshot.artist}\u0000${snapshot.album}\u0000${snapshot.durationMs}`
       : "";
     if (trackKey !== state.trackKey) {
       state.trackKey = trackKey;
       state.lines = [];
       state.activeIndex = Number.NaN;
       state.lyricStatus = "idle";
+      state.fetchToken += 1;
+      state.lyricAttempts = 0;
       if (trackKey) loadLyrics(snapshot, trackKey);
       else renderLyricWindow(-1);
+    } else if (trackKey && state.lyricStatus === "error"
+      && state.lyricAttempts < 3 && performance.now() >= state.lyricRetryAt) {
+      loadLyrics(snapshot, trackKey);
     }
   } catch (error) {
     state.positionMs = estimatedPosition();
@@ -503,6 +520,22 @@ document.querySelector("#settings-reset-button").addEventListener("click", () =>
   saveDisplaySettings();
   applyDisplaySettings();
   showToast("歌词显示已恢复默认");
+});
+
+document.querySelector("#feedback-button").addEventListener("click", async () => {
+  const source = state.source.toLowerCase();
+  const platform = source.includes("cloudmusic") ? "网易云音乐"
+    : source.includes("qqmusic") ? "QQ 音乐"
+      : source.includes("kugou") ? "酷狗音乐"
+        : source.includes("kuwo") ? "酷我音乐"
+          : source.includes("spotify") ? "Spotify"
+            : source.includes("applemusic") || source.includes("itunes") ? "Apple Music"
+              : "不确定";
+  const params = new URLSearchParams({ version: "v1.0.5", platform });
+  if (state.title) params.set("song", `${state.title}${state.artist ? ` - ${state.artist}` : ""}`);
+  const url = `https://riverxilee-feedback.riverxilee.chatgpt.site/?${params}`;
+  if (IS_TAURI) await openUrl(url);
+  else window.open(url, "_blank", "noopener,noreferrer");
 });
 
 elements.lock.addEventListener("click", async () => {

@@ -39,6 +39,7 @@ static CLOCK: OnceLock<Mutex<Option<NeteaseClock>>> = OnceLock::new();
 static LAST_TRACK: OnceLock<Mutex<Option<PlaybackSample>>> = OnceLock::new();
 
 pub struct TrackSnapshot {
+    pub track_id: String,
     pub title: String,
     pub artist: String,
     pub album: String,
@@ -48,6 +49,7 @@ pub struct TrackSnapshot {
 }
 
 struct TrackMetadata {
+    track_id: String,
     title: String,
     artist: String,
     album: String,
@@ -162,6 +164,11 @@ fn parse_history_track(kind: &str, json: &str) -> Option<TrackMetadata> {
         return None;
     }
     Some(TrackMetadata {
+        track_id: track["id"]
+            .as_i64()
+            .map(|value| value.to_string())
+            .or_else(|| track["id"].as_str().map(str::to_string))
+            .unwrap_or_default(),
         title: title.to_string(),
         artist,
         album: track["album"]["name"]
@@ -184,6 +191,30 @@ fn current_database_track() -> Option<TrackMetadata> {
     )
     .ok()?;
     latest_history_track(&connection)
+}
+
+pub fn current_track_id(title: &str, artist: &str) -> Option<String> {
+    fn normalized(value: &str) -> String {
+        value
+            .chars()
+            .filter(|character| character.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    let track = current_database_track()?;
+    let wanted_artist = normalized(artist);
+    let found_artist = normalized(&track.artist);
+    let matches = normalized(&track.title) == normalized(title)
+        && (wanted_artist.is_empty()
+            || found_artist.contains(&wanted_artist)
+            || wanted_artist.contains(&found_artist));
+    (matches
+        && !track.track_id.is_empty()
+        && track
+            .track_id
+            .chars()
+            .all(|character| character.is_ascii_digit()))
+    .then_some(track.track_id)
 }
 
 fn latest_history_track(connection: &Connection) -> Option<TrackMetadata> {
@@ -311,6 +342,7 @@ pub fn current_track() -> Option<TrackSnapshot> {
         position_ms,
     });
     Some(TrackSnapshot {
+        track_id: metadata.track_id,
         title: metadata.title,
         artist: metadata.artist,
         album: metadata.album,
@@ -347,12 +379,14 @@ mod tests {
     #[test]
     fn parses_only_regular_tracks_from_netease_history() {
         let json = r#"{
+          "id":1842801267,
           "name":"知我",
           "duration":277321,
           "artists":[{"name":"国风堂"},{"name":"哦漏"}],
           "album":{"name":"知我"}
         }"#;
         let track = parse_history_track("track", json).expect("track should parse");
+        assert_eq!(track.track_id, "1842801267");
         assert_eq!(track.title, "知我");
         assert_eq!(track.artist, "国风堂/哦漏");
         assert_eq!(track.album, "知我");

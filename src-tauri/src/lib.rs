@@ -20,6 +20,7 @@ static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 struct MediaSnapshot {
     connected: bool,
     source: String,
+    track_id: String,
     title: String,
     artist: String,
     album: String,
@@ -57,8 +58,8 @@ fn timeline_timestamp_ms(winrt_ticks: i64) -> Option<i64> {
     (unix_ms > 0).then_some(unix_ms)
 }
 
-fn needs_netease_clock(source: &str, position_ms: i64, duration_ms: i64) -> bool {
-    source.to_ascii_lowercase().contains("cloudmusic") && position_ms == 0 && duration_ms == 0
+fn needs_netease_clock(source: &str) -> bool {
+    source.to_ascii_lowercase().contains("cloudmusic")
 }
 
 async fn media_manager() -> Result<GlobalSystemMediaTransportControlsSessionManager, String> {
@@ -173,6 +174,7 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
             return Ok(MediaSnapshot {
                 connected: true,
                 source: "cloudmusic.exe".to_string(),
+                track_id: track.track_id,
                 title: track.title,
                 artist: track.artist,
                 album: track.album,
@@ -187,6 +189,7 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
         return Ok(MediaSnapshot {
             connected: false,
             source: String::new(),
+            track_id: String::new(),
             title: String::new(),
             artist: String::new(),
             album: String::new(),
@@ -220,22 +223,30 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
         .LastUpdatedTime()
         .ok()
         .and_then(|value| timeline_timestamp_ms(value.UniversalTime));
-    if needs_netease_clock(&source, position_ms, duration_ms) {
+    if needs_netease_clock(&source) {
         if let Some(netease_position_ms) = netease::current_position_ms() {
             position_ms = netease_position_ms;
             timeline_updated_at_ms = i64::try_from(captured_at_ms).ok();
         }
     }
 
+    let title = properties.Title().map_err(error_text)?.to_string();
+    let resolved_artist = if artist.is_empty() {
+        album_artist
+    } else {
+        artist
+    };
+    let track_id = if source.to_ascii_lowercase().contains("cloudmusic") {
+        netease::current_track_id(&title, &resolved_artist).unwrap_or_default()
+    } else {
+        String::new()
+    };
     Ok(MediaSnapshot {
         connected: true,
         source,
-        title: properties.Title().map_err(error_text)?.to_string(),
-        artist: if artist.is_empty() {
-            album_artist
-        } else {
-            artist
-        },
+        track_id,
+        title,
+        artist: resolved_artist,
         album: properties.AlbumTitle().map_err(error_text)?.to_string(),
         is_playing: playback.PlaybackStatus().map_err(error_text)?
             == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing,
@@ -301,14 +312,23 @@ fn candidate_score(
     let found_album = normalize(candidate_album);
     let mut score = 0;
 
+    if wanted_title.is_empty() || found_title.is_empty() {
+        return -1;
+    }
+
     if found_title == wanted_title {
         score += 220;
     } else if found_title.contains(&wanted_title) || wanted_title.contains(&found_title) {
         score += 110;
+    } else {
+        return -1;
     }
-    if !wanted_artist.is_empty()
-        && (found_artist.contains(&wanted_artist) || wanted_artist.contains(&found_artist))
-    {
+    if !wanted_artist.is_empty() {
+        if found_artist.is_empty()
+            || !(found_artist.contains(&wanted_artist) || wanted_artist.contains(&found_artist))
+        {
+            return -1;
+        }
         score += 90;
     }
     if !wanted_album.is_empty() && found_album == wanted_album {
@@ -321,6 +341,10 @@ fn candidate_score(
             score += 50;
         } else if difference <= 6_000 {
             score += 20;
+        } else if difference > 15_000 {
+            return -1;
+        } else {
+            score -= 50;
         }
     }
     score
@@ -342,16 +366,52 @@ async fn fetch_lyrics(
     artist: String,
     album: String,
     duration_ms: i64,
+    source: String,
+    track_id: String,
 ) -> Result<LyricsResult, String> {
     if title.trim().is_empty() {
         return Err("当前播放器暂未提供歌曲名称".to_string());
     }
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.0")
+            .timeout(std::time::Duration::from_secs(12))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.5")
             .build()
             .expect("HTTP client should initialize")
     });
+    if source.to_ascii_lowercase().contains("cloudmusic")
+        && !track_id.is_empty()
+        && track_id.chars().all(|character| character.is_ascii_digit())
+    {
+        if let Ok(response) = client
+            .get("https://music.163.com/api/song/lyric")
+            .header("Referer", "https://music.163.com/")
+            .query(&[
+                ("id", track_id.as_str()),
+                ("lv", "1"),
+                ("kv", "1"),
+                ("tv", "-1"),
+            ])
+            .send()
+            .await
+        {
+            if let Ok(response) = response.error_for_status() {
+                if let Ok(native) = response.json::<Value>().await {
+                    if let Some(lrc) = native["lrc"]["lyric"]
+                        .as_str()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        return Ok(LyricsResult {
+                            lrc: lrc.to_string(),
+                            song_mid: format!("netease:{track_id}"),
+                            matched_title: title,
+                            matched_artist: artist,
+                        });
+                    }
+                }
+            }
+        }
+    }
     let query = format!("{} {}", title.trim(), artist.trim());
     let search: Value = client
         .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
@@ -373,56 +433,85 @@ async fn fetch_lyrics(
     let candidates = search["data"]["song"]["list"]
         .as_array()
         .ok_or_else(|| "没有找到匹配歌曲".to_string())?;
-    let candidate = candidates
+    let mut ranked = candidates
         .iter()
-        .max_by_key(|item| candidate_score(item, &title, &artist, &album, duration_ms))
-        .ok_or_else(|| "没有找到匹配歌曲".to_string())?;
-    let song_mid = candidate["songmid"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "匹配歌曲缺少歌词标识".to_string())?;
-    let lyric: Value = client
-        .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
-        .header("Referer", "https://y.qq.com/")
-        .query(&[
-            ("songmid", song_mid),
-            ("format", "json"),
-            ("nobase64", "1"),
-            ("g_tk", "5381"),
-        ])
-        .send()
-        .await
-        .map_err(error_text)?
-        .error_for_status()
-        .map_err(error_text)?
-        .json()
-        .await
-        .map_err(error_text)?;
-    let lrc = lyric["lyric"]
-        .as_str()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "这首歌暂时没有可用歌词".to_string())?;
-    let matched_artist = candidate["singer"]
-        .as_array()
-        .map(|singers| {
-            singers
-                .iter()
-                .filter_map(|singer| singer["name"].as_str())
-                .collect::<Vec<_>>()
-                .join(" / ")
+        .map(|item| {
+            (
+                candidate_score(item, &title, &artist, &album, duration_ms),
+                item,
+            )
         })
-        .unwrap_or_default();
+        .filter(|(score, _)| *score >= 220)
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    for (_, candidate) in ranked.into_iter().take(3) {
+        let song_mid = candidate["songmid"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "匹配歌曲缺少歌词标识".to_string())?;
+        let lyric: Value = client
+            .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+            .header("Referer", "https://y.qq.com/")
+            .query(&[
+                ("songmid", song_mid),
+                ("format", "json"),
+                ("nobase64", "1"),
+                ("g_tk", "5381"),
+            ])
+            .send()
+            .await
+            .map_err(error_text)?
+            .error_for_status()
+            .map_err(error_text)?
+            .json()
+            .await
+            .map_err(error_text)?;
+        let Some(lrc) = lyric["lyric"]
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        let matched_artist = candidate["singer"]
+            .as_array()
+            .map(|singers| {
+                singers
+                    .iter()
+                    .filter_map(|singer| singer["name"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            })
+            .unwrap_or_default();
 
-    Ok(LyricsResult {
-        lrc: decode_entities(lrc),
-        song_mid: song_mid.to_string(),
-        matched_title: candidate["songname"].as_str().unwrap_or(&title).to_string(),
-        matched_artist,
-    })
+        return Ok(LyricsResult {
+            lrc: decode_entities(lrc),
+            song_mid: song_mid.to_string(),
+            matched_title: candidate["songname"].as_str().unwrap_or(&title).to_string(),
+            matched_artist,
+        });
+    }
+    Err("没有找到版本匹配且可用的歌词".to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rejects_wrong_artist_and_different_recording_duration() {
+        let song =
+            serde_json::json!({"songname":"我要的", "singer":[{"name":"歌手甲"}], "interval":240});
+        assert!(super::candidate_score(&song, "我要的", "歌手乙", "", 240000) < 0);
+        assert!(super::candidate_score(&song, "我要的", "歌手甲", "", 180000) < 0);
+        assert!(super::candidate_score(&song, "我要的", "歌手甲", "", 241000) >= 220);
+    }
+
+    #[test]
+    fn rejects_empty_metadata_and_unrelated_titles() {
+        let empty = serde_json::json!({"songname":"", "singer":[]});
+        assert!(super::candidate_score(&empty, "我要的", "歌手甲", "", 0) < 0);
+        let other = serde_json::json!({"songname":"另一首歌", "singer":[{"name":"歌手甲"}]});
+        assert!(super::candidate_score(&other, "我要的", "歌手甲", "", 0) < 0);
+    }
+
     use super::{needs_netease_clock, source_is_supported_music_app, timeline_timestamp_ms};
 
     #[test]
@@ -460,10 +549,10 @@ mod tests {
     }
 
     #[test]
-    fn uses_private_netease_clock_only_when_its_system_timeline_is_empty() {
-        assert!(needs_netease_clock("cloudmusic.exe", 0, 0));
-        assert!(!needs_netease_clock("cloudmusic.exe", 1_000, 200_000));
-        assert!(!needs_netease_clock("QQMusic.exe", 0, 0));
+    fn always_prefers_the_verified_private_netease_clock() {
+        assert!(needs_netease_clock("cloudmusic.exe"));
+        assert!(needs_netease_clock("CloudMusic.Desktop"));
+        assert!(!needs_netease_clock("QQMusic.exe"));
     }
 }
 
@@ -499,6 +588,7 @@ fn start_dragging(window: WebviewWindow) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {

@@ -629,6 +629,12 @@ button {
   margin-top: 11px;
 }
 
+.settings-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
 .text-button {
   flex: 0 0 auto;
   padding: 5px 9px;

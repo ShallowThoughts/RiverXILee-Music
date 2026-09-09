@@ -350,6 +350,155 @@ fn candidate_score(
     score
 }
 
+fn netease_artist(candidate: &Value) -> String {
+    candidate["artists"]
+        .as_array()
+        .or_else(|| candidate["ar"].as_array())
+        .map(|artists| {
+            artists
+                .iter()
+                .filter_map(|artist| artist["name"].as_str())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        })
+        .unwrap_or_default()
+}
+
+fn netease_candidate_score(candidate: &Value, title: &str, artist: &str, duration_ms: i64) -> i64 {
+    let wanted_title = normalize(title);
+    let found_title = normalize(candidate["name"].as_str().unwrap_or_default());
+    let wanted_artist = normalize(artist);
+    let found_artist = normalize(&netease_artist(candidate));
+    let mut score = 0;
+
+    if wanted_title.is_empty() || found_title.is_empty() {
+        return -1;
+    }
+    if found_title == wanted_title {
+        score += 220;
+    } else if found_title.contains(&wanted_title) || wanted_title.contains(&found_title) {
+        score += 110;
+    } else {
+        return -1;
+    }
+    if !wanted_artist.is_empty() {
+        if found_artist.is_empty()
+            || !(found_artist.contains(&wanted_artist) || wanted_artist.contains(&found_artist))
+        {
+            return -1;
+        }
+        score += 90;
+    }
+    let found_duration = candidate["duration"]
+        .as_i64()
+        .or_else(|| candidate["dt"].as_i64())
+        .unwrap_or_default();
+    if duration_ms > 0 && found_duration > 0 {
+        let difference = (found_duration - duration_ms).abs();
+        if difference <= 2_500 {
+            score += 50;
+        } else if difference <= 6_000 {
+            score += 20;
+        } else if difference > 15_000 {
+            return -1;
+        } else {
+            score -= 50;
+        }
+    }
+    score
+}
+
+async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Option<String> {
+    let response = client
+        .get("https://music.163.com/api/song/lyric")
+        .header("Referer", "https://music.163.com/")
+        .query(&[
+            ("id", track_id),
+            ("lv", "-1"),
+            ("kv", "-1"),
+            ("tv", "-1"),
+            ("os", "pc"),
+        ])
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let native = response.json::<Value>().await.ok()?;
+    native["lrc"]["lyric"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+async fn fetch_netease_lyrics(
+    client: &reqwest::Client,
+    title: &str,
+    artist: &str,
+    duration_ms: i64,
+    track_id: &str,
+) -> Option<LyricsResult> {
+    if !track_id.is_empty() && track_id.chars().all(|character| character.is_ascii_digit()) {
+        if let Some(lrc) = fetch_netease_lrc(client, track_id).await {
+            return Some(LyricsResult {
+                lrc,
+                song_mid: format!("netease:{track_id}"),
+                matched_title: title.to_string(),
+                matched_artist: artist.to_string(),
+            });
+        }
+    }
+
+    let query = format!("{} {}", title.trim(), artist.trim());
+    let search = client
+        .get("https://music.163.com/api/search/get/web")
+        .header("Referer", "https://music.163.com/")
+        .query(&[
+            ("s", query.as_str()),
+            ("type", "1"),
+            ("limit", "10"),
+            ("offset", "0"),
+        ])
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<Value>()
+        .await
+        .ok()?;
+    let candidates = search["result"]["songs"].as_array()?;
+    let mut ranked = candidates
+        .iter()
+        .map(|item| {
+            (
+                netease_candidate_score(item, title, artist, duration_ms),
+                item,
+            )
+        })
+        .filter(|(score, _)| *score >= 220)
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+
+    for (_, candidate) in ranked.into_iter().take(3) {
+        let Some(candidate_id) = candidate["id"].as_i64().map(|id| id.to_string()) else {
+            continue;
+        };
+        if candidate_id == track_id {
+            continue;
+        }
+        if let Some(lrc) = fetch_netease_lrc(client, &candidate_id).await {
+            return Some(LyricsResult {
+                lrc,
+                song_mid: format!("netease:{candidate_id}"),
+                matched_title: candidate["name"].as_str().unwrap_or(title).to_string(),
+                matched_artist: netease_artist(candidate),
+            });
+        }
+    }
+    None
+}
+
 fn decode_entities(value: &str) -> String {
     value
         .replace("&#39;", "'")
@@ -375,41 +524,15 @@ async fn fetch_lyrics(
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.5")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.6")
             .build()
             .expect("HTTP client should initialize")
     });
-    if source.to_ascii_lowercase().contains("cloudmusic")
-        && !track_id.is_empty()
-        && track_id.chars().all(|character| character.is_ascii_digit())
-    {
-        if let Ok(response) = client
-            .get("https://music.163.com/api/song/lyric")
-            .header("Referer", "https://music.163.com/")
-            .query(&[
-                ("id", track_id.as_str()),
-                ("lv", "1"),
-                ("kv", "1"),
-                ("tv", "-1"),
-            ])
-            .send()
-            .await
+    if source.to_ascii_lowercase().contains("cloudmusic") {
+        if let Some(result) =
+            fetch_netease_lyrics(client, &title, &artist, duration_ms, &track_id).await
         {
-            if let Ok(response) = response.error_for_status() {
-                if let Ok(native) = response.json::<Value>().await {
-                    if let Some(lrc) = native["lrc"]["lyric"]
-                        .as_str()
-                        .filter(|value| !value.trim().is_empty())
-                    {
-                        return Ok(LyricsResult {
-                            lrc: lrc.to_string(),
-                            song_mid: format!("netease:{track_id}"),
-                            matched_title: title,
-                            matched_artist: artist,
-                        });
-                    }
-                }
-            }
+            return Ok(result);
         }
     }
     let query = format!("{} {}", title.trim(), artist.trim());
@@ -510,6 +633,78 @@ mod tests {
         assert!(super::candidate_score(&empty, "我要的", "歌手甲", "", 0) < 0);
         let other = serde_json::json!({"songname":"另一首歌", "singer":[{"name":"歌手甲"}]});
         assert!(super::candidate_score(&other, "我要的", "歌手甲", "", 0) < 0);
+    }
+
+    #[test]
+    fn ranks_netease_search_results_by_recording_metadata() {
+        let original = serde_json::json!({
+            "id": 2700280922_i64,
+            "name": "坏天气",
+            "artists": [{"name": "贾格JuggShots"}],
+            "duration": 153675
+        });
+        let accelerated = serde_json::json!({
+            "id": 2700280923_i64,
+            "name": "坏天气（加速版）",
+            "artists": [{"name": "贾格JuggShots"}],
+            "duration": 139704
+        });
+        assert!(
+            super::netease_candidate_score(&original, "坏天气", "贾格JuggShots", 153675) >= 220
+        );
+        assert!(
+            super::netease_candidate_score(&accelerated, "坏天气", "贾格JuggShots", 153675) < 220
+        );
+    }
+
+    #[test]
+    fn supports_both_netease_artist_response_shapes() {
+        let web = serde_json::json!({
+            "name": "add cola",
+            "artists": [{"name": "三棱镜"}, {"name": "Zy"}],
+            "duration": 193333
+        });
+        let app = serde_json::json!({
+            "name": "add cola",
+            "ar": [{"name": "三棱镜"}, {"name": "Zy"}],
+            "dt": 193333
+        });
+        assert_eq!(super::netease_artist(&web), "三棱镜 / Zy");
+        assert_eq!(super::netease_artist(&app), "三棱镜 / Zy");
+        assert!(super::netease_candidate_score(&app, "add cola", "三棱镜/Zy", 193333) >= 220);
+    }
+
+    #[test]
+    #[ignore = "live NetEase API regression check"]
+    fn resolves_reported_netease_songs_without_a_history_track_id() {
+        let songs = [
+            ("坏天气", "贾格JuggShots", 153675, "2700280922"),
+            ("坏雨季", "鸟森/野生三十", 142656, "2709763704"),
+            ("song4love.", "8bite", 208721, "2153152701"),
+            ("add cola", "三棱镜/Zy", 193333, "2727822629"),
+            ("KLEIN BLUE", "Nine Band", 170756, "1964744004"),
+        ];
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/test")
+            .build()
+            .unwrap();
+
+        tauri::async_runtime::block_on(async {
+            for (title, artist, duration_ms, expected_id) in songs {
+                assert!(
+                    super::fetch_netease_lrc(&client, expected_id)
+                        .await
+                        .is_some(),
+                    "direct lyric lookup failed for {expected_id}"
+                );
+                let result = super::fetch_netease_lyrics(&client, title, artist, duration_ms, "")
+                    .await
+                    .unwrap_or_else(|| panic!("failed to resolve {title} - {artist}"));
+                assert_eq!(result.song_mid, format!("netease:{expected_id}"));
+                assert!(!result.lrc.trim().is_empty());
+            }
+        });
     }
 
     use super::{needs_netease_clock, source_is_supported_music_app, timeline_timestamp_ms};

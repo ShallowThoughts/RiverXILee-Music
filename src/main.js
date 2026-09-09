@@ -531,7 +531,7 @@ document.querySelector("#feedback-button").addEventListener("click", async () =>
           : source.includes("spotify") ? "Spotify"
             : source.includes("applemusic") || source.includes("itunes") ? "Apple Music"
               : "不确定";
-  const params = new URLSearchParams({ version: "v1.0.5", platform });
+  const params = new URLSearchParams({ version: "v1.0.6", platform });
   if (state.title) params.set("song", `${state.title}${state.artist ? ` - ${state.artist}` : ""}`);
   const url = `https://riverxilee-feedback.riverxilee.chatgpt.site/?${params}`;
   if (IS_TAURI) await openUrl(url);

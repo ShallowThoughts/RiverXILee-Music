@@ -171,10 +171,24 @@ document.querySelector("#app").innerHTML = `
         <span>逐字效果会根据当前歌词行的时间平滑推进</span>
         <div class="settings-actions">
           <button class="text-button" id="feedback-button" type="button">问题反馈</button>
+          <button class="text-button" id="update-check-button" type="button">检查更新</button>
           <button class="text-button" id="settings-reset-button" type="button">恢复默认</button>
         </div>
       </div>
     </aside>
+
+    <section class="update-banner" id="update-banner" aria-live="polite" aria-hidden="true">
+      <div class="liquid-layer" aria-hidden="true"></div>
+      <i class="ph ph-arrow-circle-up" aria-hidden="true"></i>
+      <div class="update-copy">
+        <strong id="update-title">发现新版本</strong>
+        <span id="update-detail">点击下载最新版</span>
+      </div>
+      <button class="text-button update-download" id="update-download-button" type="button">下载更新</button>
+      <button class="icon-button quiet" id="update-dismiss-button" type="button" aria-label="稍后更新" title="稍后">
+        <i class="ph ph-x" aria-hidden="true"></i>
+      </button>
+    </section>
 
     <div class="toast" id="toast" role="status"></div>
   </main>
@@ -193,10 +207,42 @@ const elements = {
   fullscreen: document.querySelector("#fullscreen-button"),
   settings: document.querySelector("#settings-button"),
   settingsPanel: document.querySelector("#settings-panel"),
+  updateBanner: document.querySelector("#update-banner"),
+  updateTitle: document.querySelector("#update-title"),
+  updateDetail: document.querySelector("#update-detail"),
+  updateDownload: document.querySelector("#update-download-button"),
   lock: document.querySelector("#lock-button"),
   toast: document.querySelector("#toast"),
   colorPicker: document.querySelector("#lyric-color-picker"),
 };
+
+let availableUpdate = null;
+let updateCheckInFlight = false;
+
+function setUpdateBannerVisible(visible) {
+  elements.updateBanner.classList.toggle("is-visible", visible);
+  elements.updateBanner.setAttribute("aria-hidden", String(!visible));
+}
+
+async function checkForUpdates({ manual = false } = {}) {
+  if (!IS_TAURI || updateCheckInFlight) return;
+  updateCheckInFlight = true;
+  try {
+    const update = await invoke("check_for_update");
+    if (update.available) {
+      availableUpdate = update;
+      elements.updateTitle.textContent = `发现 v${update.latestVersion}`;
+      elements.updateDetail.textContent = `当前 v${update.currentVersion} · 已有新版本`;
+      setUpdateBannerVisible(true);
+    } else if (manual) {
+      showToast(`当前已是最新版 v${update.currentVersion}`);
+    }
+  } catch {
+    if (manual) showToast("暂时无法检查更新，请稍后重试");
+  } finally {
+    updateCheckInFlight = false;
+  }
+}
 
 const settingInputs = [...document.querySelectorAll("[data-setting]")];
 const colorInputs = [...document.querySelectorAll("[data-color-channel]")];
@@ -538,6 +584,20 @@ document.querySelector("#feedback-button").addEventListener("click", async () =>
   else window.open(url, "_blank", "noopener,noreferrer");
 });
 
+document.querySelector("#update-check-button").addEventListener("click", () => {
+  checkForUpdates({ manual: true });
+});
+
+elements.updateDownload.addEventListener("click", async () => {
+  if (!availableUpdate?.downloadUrl) return;
+  if (IS_TAURI) await openUrl(availableUpdate.downloadUrl);
+  else window.open(availableUpdate.downloadUrl, "_blank", "noopener,noreferrer");
+});
+
+document.querySelector("#update-dismiss-button").addEventListener("click", () => {
+  setUpdateBannerVisible(false);
+});
+
 elements.lock.addEventListener("click", async () => {
   setSettingsOpen(false);
   state.locked = true;
@@ -564,6 +624,8 @@ if (IS_TAURI) {
   });
   pollMedia();
   setInterval(pollMedia, 650);
+  setTimeout(checkForUpdates, 3_500);
+  setInterval(checkForUpdates, 6 * 60 * 60 * 1_000);
 } else {
   state.connected = true;
   state.title = "恋人";

@@ -483,6 +483,74 @@ button {
   transition: opacity 180ms ease, transform 180ms ease;
 }
 
+.update-banner {
+  position: absolute;
+  top: 58px;
+  left: 50%;
+  z-index: 7;
+  display: grid;
+  width: min(440px, calc(100vw - 36px));
+  min-height: 52px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  padding: 7px 8px 7px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.17);
+  border-radius: var(--radius-control);
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(8, 12, 14, 0.32);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    inset 0 0 12px rgba(255, 255, 255, 0.04),
+    0 14px 38px rgba(0, 0, 0, 0.24);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -10px) scale(0.98);
+  backdrop-filter: blur(18px) saturate(1.35) brightness(1.04);
+  -webkit-backdrop-filter: blur(18px) saturate(1.35) brightness(1.04);
+  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.update-banner.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0) scale(1);
+}
+
+.update-banner > :not(.liquid-layer) {
+  position: relative;
+  z-index: 1;
+}
+
+.update-banner > i {
+  color: var(--accent);
+  font-size: 20px;
+}
+
+.update-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.update-copy strong {
+  font-size: 12px;
+}
+
+.update-copy span {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.update-download {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .settings-panel {
   position: absolute;
   right: 18px;
@@ -659,7 +727,8 @@ button {
 
 .overlay-shell.is-locked .titlebar,
 .overlay-shell.is-locked .control-wrap,
-.overlay-shell.is-locked .settings-panel {
+.overlay-shell.is-locked .settings-panel,
+.overlay-shell.is-locked .update-banner {
   opacity: 0;
   pointer-events: none;
 }
@@ -702,7 +771,8 @@ body.is-fullscreen .lyrics-stack {
 @media (prefers-reduced-transparency: reduce) {
   .control-bar,
   .toast,
-  .settings-panel {
+  .settings-panel,
+  .update-banner {
     background: rgba(14, 19, 21, 0.96);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;

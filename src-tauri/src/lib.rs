@@ -41,6 +41,15 @@ struct LyricsResult {
     matched_artist: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    available: bool,
+    current_version: String,
+    latest_version: String,
+    download_url: String,
+}
+
 fn error_text(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -509,6 +518,87 @@ fn decode_entities(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+fn version_numbers(value: &str) -> Vec<u64> {
+    value
+        .trim()
+        .trim_start_matches(['v', 'V'])
+        .split('.')
+        .map(|part| {
+            part.chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u64>()
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    let latest = version_numbers(latest);
+    let current = version_numbers(current);
+    let length = latest.len().max(current.len());
+    (0..length)
+        .map(|index| {
+            (
+                *latest.get(index).unwrap_or(&0),
+                *current.get(index).unwrap_or(&0),
+            )
+        })
+        .find(|(latest, current)| latest != current)
+        .is_some_and(|(latest, current)| latest > current)
+}
+
+#[tauri::command]
+async fn check_for_update() -> Result<UpdateInfo, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let client = HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.6")
+            .build()
+            .expect("HTTP client should initialize")
+    });
+    let release: Value = client
+        .get("https://api.github.com/repos/ShallowThoughts/RiverXILee-Music/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(error_text)?
+        .error_for_status()
+        .map_err(error_text)?
+        .json()
+        .await
+        .map_err(error_text)?;
+    let latest_version = release["tag_name"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_start_matches(['v', 'V'])
+        .to_string();
+    if latest_version.is_empty() {
+        return Err("GitHub 最新版本信息不完整".to_string());
+    }
+    let download_url = release["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets.iter().find(|asset| {
+                asset["name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with("_x64-setup.exe"))
+            })
+        })
+        .and_then(|asset| asset["browser_download_url"].as_str())
+        .or_else(|| release["html_url"].as_str())
+        .unwrap_or("https://github.com/ShallowThoughts/RiverXILee-Music/releases/latest")
+        .to_string();
+
+    Ok(UpdateInfo {
+        available: is_newer_version(&latest_version, &current_version),
+        current_version,
+        latest_version,
+        download_url,
+    })
+}
+
 #[tauri::command]
 async fn fetch_lyrics(
     title: String,
@@ -675,6 +765,24 @@ mod tests {
     }
 
     #[test]
+    fn compares_release_versions_numerically() {
+        assert!(super::is_newer_version("v1.0.7", "1.0.6"));
+        assert!(super::is_newer_version("1.10.0", "1.9.9"));
+        assert!(!super::is_newer_version("v1.0.6", "1.0.6"));
+        assert!(!super::is_newer_version("1.0.5", "1.0.6"));
+    }
+
+    #[test]
+    #[ignore = "live GitHub Releases API check"]
+    fn reads_the_live_github_release_feed() {
+        let update = tauri::async_runtime::block_on(super::check_for_update())
+            .expect("GitHub latest release should be readable");
+        assert_eq!(update.current_version, "1.0.6");
+        assert!(!update.latest_version.is_empty());
+        assert!(update.download_url.starts_with("https://github.com/"));
+    }
+
+    #[test]
     #[ignore = "live NetEase API regression check"]
     fn resolves_reported_netease_songs_without_a_history_track_id() {
         let songs = [
@@ -804,6 +912,7 @@ pub fn run() {
             get_media_snapshot,
             control_media,
             fetch_lyrics,
+            check_for_update,
             set_always_on_top,
             set_fullscreen,
             set_click_through,

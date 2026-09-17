@@ -68,6 +68,23 @@ fn timeline_timestamp_ms(winrt_ticks: i64) -> Option<i64> {
     (unix_ms > 0).then_some(unix_ms)
 }
 
+fn netease_media_snapshot(track: netease::TrackSnapshot, captured_at_ms: u128) -> MediaSnapshot {
+    MediaSnapshot {
+        connected: true,
+        source: "cloudmusic.exe".to_string(),
+        track_id: track.track_id,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        is_playing: track.is_playing,
+        playback_rate: 1.0,
+        position_ms: track.position_ms,
+        duration_ms: track.duration_ms,
+        timeline_updated_at_ms: i64::try_from(captured_at_ms).ok(),
+        captured_at_ms,
+    }
+}
+
 fn needs_netease_clock(source: &str) -> bool {
     source.to_ascii_lowercase().contains("cloudmusic")
 }
@@ -178,23 +195,18 @@ async fn active_media_session() -> Result<Option<GlobalSystemMediaTransportContr
 
 #[tauri::command]
 async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
+    let captured_at_ms = now_ms();
+    let mut netease_track = netease::current_track();
+    if netease_track.as_ref().is_some_and(|track| track.is_playing) {
+        return Ok(netease_media_snapshot(
+            netease_track.take().expect("NetEase track should exist"),
+            captured_at_ms,
+        ));
+    }
+
     let Some(session) = active_media_session().await? else {
-        let captured_at_ms = now_ms();
-        if let Some(track) = netease::current_track() {
-            return Ok(MediaSnapshot {
-                connected: true,
-                source: "cloudmusic.exe".to_string(),
-                track_id: track.track_id,
-                title: track.title,
-                artist: track.artist,
-                album: track.album,
-                is_playing: track.is_playing,
-                playback_rate: 1.0,
-                position_ms: track.position_ms,
-                duration_ms: track.duration_ms,
-                timeline_updated_at_ms: i64::try_from(captured_at_ms).ok(),
-                captured_at_ms,
-            });
+        if let Some(track) = netease_track {
+            return Ok(netease_media_snapshot(track, captured_at_ms));
         }
         return Ok(MediaSnapshot {
             connected: false,
@@ -226,7 +238,6 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
     let artist = properties.Artist().map_err(error_text)?.to_string();
     let album_artist = properties.AlbumArtist().map_err(error_text)?.to_string();
 
-    let captured_at_ms = now_ms();
     let mut position_ms = (timeline.Position().map_err(error_text)?.Duration / 10_000).max(0);
     let duration_ms = (timeline.EndTime().map_err(error_text)?.Duration / 10_000).max(0);
     let mut timeline_updated_at_ms = timeline
@@ -941,6 +952,21 @@ mod tests {
                 assert!(!result.lrc.trim().is_empty());
             }
         });
+    }
+
+    #[test]
+    #[ignore = "live dual-player selection regression check"]
+    fn prefers_advancing_netease_over_an_idle_qq_music_session() {
+        let snapshot = tauri::async_runtime::block_on(async {
+            let _ = super::get_media_snapshot().await;
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            super::get_media_snapshot()
+                .await
+                .expect("media snapshot should be available")
+        });
+        assert_eq!(snapshot.source, "cloudmusic.exe");
+        assert!(snapshot.is_playing);
+        assert!(!snapshot.title.is_empty());
     }
 
     use super::{needs_netease_clock, source_is_supported_music_app, timeline_timestamp_ms};

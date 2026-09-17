@@ -238,7 +238,7 @@ fn playback_is_advancing(
     artist: &str,
     position_ms: i64,
 ) -> bool {
-    previous.is_none_or(|sample| {
+    previous.is_some_and(|sample| {
         sample.title != title || sample.artist != artist || sample.position_ms != position_ms
     })
 }
@@ -440,5 +440,6 @@ mod tests {
             12_500
         ));
         assert!(playback_is_advancing(Some(&previous), "下一首", "歌手", 0));
+        assert!(!playback_is_advancing(None, "知我", "国风堂/哦漏", 12_500));
     }
 }

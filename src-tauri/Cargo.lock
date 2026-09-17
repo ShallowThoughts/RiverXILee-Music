@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "riverxilee-desktop-lyrics"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "futures-lite",
  "reqwest 0.12.28",

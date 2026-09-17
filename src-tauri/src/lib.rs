@@ -1,5 +1,6 @@
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, WebviewWindow};
@@ -294,6 +295,44 @@ fn normalize(value: &str) -> String {
         .collect()
 }
 
+fn title_without_bracketed_qualifiers(value: &str) -> String {
+    let mut result = String::new();
+    let mut depth = 0_u32;
+    for character in value.chars() {
+        if matches!(character, '(' | '（' | '[' | '【' | '{') {
+            depth += 1;
+        } else if matches!(character, ')' | '）' | ']' | '】' | '}') {
+            depth = depth.saturating_sub(1);
+        } else if depth == 0 {
+            result.push(character);
+        }
+    }
+    result
+        .trim()
+        .trim_end_matches(['-', '–', '—', '·', '•', ' '])
+        .trim()
+        .to_string()
+}
+
+fn lyric_search_queries(title: &str, artist: &str) -> Vec<String> {
+    let title = title.trim();
+    let artist = artist.trim();
+    let simplified_title = title_without_bracketed_qualifiers(title);
+    let mut queries = Vec::new();
+    for query in [
+        format!("{title} {artist}"),
+        format!("{simplified_title} {artist}"),
+        title.to_string(),
+        simplified_title,
+    ] {
+        let query = query.trim().to_string();
+        if !query.is_empty() && !queries.iter().any(|existing| existing == &query) {
+            queries.push(query);
+        }
+    }
+    queries
+}
+
 fn candidate_score(
     candidate: &Value,
     title: &str,
@@ -458,51 +497,58 @@ async fn fetch_netease_lyrics(
         }
     }
 
-    let query = format!("{} {}", title.trim(), artist.trim());
-    let search = client
-        .get("https://music.163.com/api/search/get/web")
-        .header("Referer", "https://music.163.com/")
-        .query(&[
-            ("s", query.as_str()),
-            ("type", "1"),
-            ("limit", "10"),
-            ("offset", "0"),
-        ])
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<Value>()
-        .await
-        .ok()?;
-    let candidates = search["result"]["songs"].as_array()?;
-    let mut ranked = candidates
-        .iter()
-        .map(|item| {
-            (
-                netease_candidate_score(item, title, artist, duration_ms),
-                item,
-            )
-        })
-        .filter(|(score, _)| *score >= 220)
-        .collect::<Vec<_>>();
-    ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-
-    for (_, candidate) in ranked.into_iter().take(3) {
-        let Some(candidate_id) = candidate["id"].as_i64().map(|id| id.to_string()) else {
+    let mut tried_ids = HashSet::new();
+    tried_ids.insert(track_id.to_string());
+    for query in lyric_search_queries(title, artist) {
+        let Some(search) = client
+            .get("https://music.163.com/api/search/get/web")
+            .header("Referer", "https://music.163.com/")
+            .query(&[
+                ("s", query.as_str()),
+                ("type", "1"),
+                ("limit", "10"),
+                ("offset", "0"),
+            ])
+            .send()
+            .await
+            .ok()
+            .and_then(|response| response.error_for_status().ok())
+        else {
             continue;
         };
-        if candidate_id == track_id {
+        let Ok(search) = search.json::<Value>().await else {
             continue;
-        }
-        if let Some(lrc) = fetch_netease_lrc(client, &candidate_id).await {
-            return Some(LyricsResult {
-                lrc,
-                song_mid: format!("netease:{candidate_id}"),
-                matched_title: candidate["name"].as_str().unwrap_or(title).to_string(),
-                matched_artist: netease_artist(candidate),
-            });
+        };
+        let Some(candidates) = search["result"]["songs"].as_array() else {
+            continue;
+        };
+        let mut ranked = candidates
+            .iter()
+            .map(|item| {
+                (
+                    netease_candidate_score(item, title, artist, duration_ms),
+                    item,
+                )
+            })
+            .filter(|(score, _)| *score >= 220)
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+
+        for (_, candidate) in ranked.into_iter().take(3) {
+            let Some(candidate_id) = candidate["id"].as_i64().map(|id| id.to_string()) else {
+                continue;
+            };
+            if !tried_ids.insert(candidate_id.clone()) {
+                continue;
+            }
+            if let Some(lrc) = fetch_netease_lrc(client, &candidate_id).await {
+                return Some(LyricsResult {
+                    lrc,
+                    song_mid: format!("netease:{candidate_id}"),
+                    matched_title: candidate["name"].as_str().unwrap_or(title).to_string(),
+                    matched_artist: netease_artist(candidate),
+                });
+            }
         }
     }
     None
@@ -554,7 +600,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.6")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.7")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -614,7 +660,7 @@ async fn fetch_lyrics(
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.6")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.7")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -625,83 +671,95 @@ async fn fetch_lyrics(
             return Ok(result);
         }
     }
-    let query = format!("{} {}", title.trim(), artist.trim());
-    let search: Value = client
-        .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
-        .header("Referer", "https://y.qq.com/")
-        .query(&[
-            ("p", "1"),
-            ("n", "12"),
-            ("w", query.as_str()),
-            ("format", "json"),
-        ])
-        .send()
-        .await
-        .map_err(error_text)?
-        .error_for_status()
-        .map_err(error_text)?
-        .json()
-        .await
-        .map_err(error_text)?;
-    let candidates = search["data"]["song"]["list"]
-        .as_array()
-        .ok_or_else(|| "没有找到匹配歌曲".to_string())?;
-    let mut ranked = candidates
-        .iter()
-        .map(|item| {
-            (
-                candidate_score(item, &title, &artist, &album, duration_ms),
-                item,
-            )
-        })
-        .filter(|(score, _)| *score >= 220)
-        .collect::<Vec<_>>();
-    ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-    for (_, candidate) in ranked.into_iter().take(3) {
-        let song_mid = candidate["songmid"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "匹配歌曲缺少歌词标识".to_string())?;
-        let lyric: Value = client
-            .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+    let mut tried_song_mids = HashSet::new();
+    for query in lyric_search_queries(&title, &artist) {
+        let Some(response) = client
+            .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
             .header("Referer", "https://y.qq.com/")
             .query(&[
-                ("songmid", song_mid),
+                ("p", "1"),
+                ("n", "12"),
+                ("w", query.as_str()),
                 ("format", "json"),
-                ("nobase64", "1"),
-                ("g_tk", "5381"),
             ])
             .send()
             .await
-            .map_err(error_text)?
-            .error_for_status()
-            .map_err(error_text)?
-            .json()
-            .await
-            .map_err(error_text)?;
-        let Some(lrc) = lyric["lyric"]
-            .as_str()
-            .filter(|value| !value.trim().is_empty())
+            .ok()
+            .and_then(|response| response.error_for_status().ok())
         else {
             continue;
         };
-        let matched_artist = candidate["singer"]
-            .as_array()
-            .map(|singers| {
-                singers
-                    .iter()
-                    .filter_map(|singer| singer["name"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(" / ")
+        let Ok(search) = response.json::<Value>().await else {
+            continue;
+        };
+        let Some(candidates) = search["data"]["song"]["list"].as_array() else {
+            continue;
+        };
+        let mut ranked = candidates
+            .iter()
+            .map(|item| {
+                (
+                    candidate_score(item, &title, &artist, &album, duration_ms),
+                    item,
+                )
             })
-            .unwrap_or_default();
+            .filter(|(score, _)| *score >= 220)
+            .collect::<Vec<_>>();
+        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
 
-        return Ok(LyricsResult {
-            lrc: decode_entities(lrc),
-            song_mid: song_mid.to_string(),
-            matched_title: candidate["songname"].as_str().unwrap_or(&title).to_string(),
-            matched_artist,
-        });
+        for (_, candidate) in ranked.into_iter().take(3) {
+            let Some(song_mid) = candidate["songmid"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            if !tried_song_mids.insert(song_mid.to_string()) {
+                continue;
+            }
+            let Some(response) = client
+                .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+                .header("Referer", "https://y.qq.com/")
+                .query(&[
+                    ("songmid", song_mid),
+                    ("format", "json"),
+                    ("nobase64", "1"),
+                    ("g_tk", "5381"),
+                ])
+                .send()
+                .await
+                .ok()
+                .and_then(|response| response.error_for_status().ok())
+            else {
+                continue;
+            };
+            let Ok(lyric) = response.json::<Value>().await else {
+                continue;
+            };
+            let Some(lrc) = lyric["lyric"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+            else {
+                continue;
+            };
+            let matched_artist = candidate["singer"]
+                .as_array()
+                .map(|singers| {
+                    singers
+                        .iter()
+                        .filter_map(|singer| singer["name"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                })
+                .unwrap_or_default();
+
+            return Ok(LyricsResult {
+                lrc: decode_entities(lrc),
+                song_mid: song_mid.to_string(),
+                matched_title: candidate["songname"].as_str().unwrap_or(&title).to_string(),
+                matched_artist,
+            });
+        }
     }
     Err("没有找到版本匹配且可用的歌词".to_string())
 }
@@ -765,11 +823,28 @@ mod tests {
     }
 
     #[test]
+    fn builds_progressively_simpler_multilingual_search_queries() {
+        assert_eq!(
+            super::lyric_search_queries("涉川·剧情版 (Single Version)", "蔡明希-不才"),
+            vec![
+                "涉川·剧情版 (Single Version) 蔡明希-不才",
+                "涉川·剧情版 蔡明希-不才",
+                "涉川·剧情版 (Single Version)",
+                "涉川·剧情版",
+            ]
+        );
+        assert_eq!(
+            super::lyric_search_queries("Supernova", "aespa (에스파)"),
+            vec!["Supernova aespa (에스파)", "Supernova"]
+        );
+    }
+
+    #[test]
     fn compares_release_versions_numerically() {
-        assert!(super::is_newer_version("v1.0.7", "1.0.6"));
+        assert!(super::is_newer_version("v1.0.8", "1.0.7"));
         assert!(super::is_newer_version("1.10.0", "1.9.9"));
-        assert!(!super::is_newer_version("v1.0.6", "1.0.6"));
-        assert!(!super::is_newer_version("1.0.5", "1.0.6"));
+        assert!(!super::is_newer_version("v1.0.7", "1.0.7"));
+        assert!(!super::is_newer_version("1.0.6", "1.0.7"));
     }
 
     #[test]
@@ -777,7 +852,7 @@ mod tests {
     fn reads_the_live_github_release_feed() {
         let update = tauri::async_runtime::block_on(super::check_for_update())
             .expect("GitHub latest release should be readable");
-        assert_eq!(update.current_version, "1.0.6");
+        assert_eq!(update.current_version, "1.0.7");
         assert!(!update.latest_version.is_empty());
         assert!(update.download_url.starts_with("https://github.com/"));
     }
@@ -810,6 +885,59 @@ mod tests {
                     .await
                     .unwrap_or_else(|| panic!("failed to resolve {title} - {artist}"));
                 assert_eq!(result.song_mid, format!("netease:{expected_id}"));
+                assert!(!result.lrc.trim().is_empty());
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "live QQ Music multilingual lyric regression check"]
+    fn resolves_current_and_multilingual_qq_music_songs() {
+        let songs = [
+            (
+                "涉川·剧情版 (Single Version)",
+                "蔡明希-不才",
+                "涉川",
+                307506,
+                "004PWior25kk4o",
+            ),
+            (
+                "APT.",
+                "ROSÉ & Bruno Mars",
+                "APT.",
+                169000,
+                "000zR7cv2QHXks",
+            ),
+            ("Supernova", "aespa", "Supernova", 178000, "000JBYAP1N4s5M"),
+            (
+                "Magnetic",
+                "ILLIT",
+                "SUPER REAL ME",
+                160000,
+                "001pQxBw1N2qnM",
+            ),
+            (
+                "How Sweet",
+                "NewJeans",
+                "How Sweet",
+                219000,
+                "002L8GpS1zi9mj",
+            ),
+        ];
+
+        tauri::async_runtime::block_on(async {
+            for (title, artist, album, duration_ms, expected_mid) in songs {
+                let result = super::fetch_lyrics(
+                    title.to_string(),
+                    artist.to_string(),
+                    album.to_string(),
+                    duration_ms,
+                    "QQMusic.exe".to_string(),
+                    String::new(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("failed to resolve {title} - {artist}: {error}"));
+                assert_eq!(result.song_mid, expected_mid);
                 assert!(!result.lrc.trim().is_empty());
             }
         });

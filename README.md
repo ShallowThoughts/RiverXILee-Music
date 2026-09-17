@@ -1,11 +1,11 @@
-# RiverXILee桌面歌词 v1.0.6
+# RiverXILee桌面歌词 v1.0.7
 
 一个为 Windows 设计的沉浸式透明多平台桌面歌词工具。RiverXILee桌面歌词通过 Windows 系统媒体会话识别当前正在播放的歌曲、播放状态和时间轴，再自动匹配在线歌词，无需本地音频。
 
 ## 下载
 
-- [RiverXILee桌面歌词 v1.0.6 安装版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.6/RiverXILee-Desktop-Lyrics_1.0.6_x64-setup.exe)
-- [RiverXILee桌面歌词 v1.0.6 便携版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.6/RiverXILee-Desktop-Lyrics_1.0.6.exe)
+- [RiverXILee桌面歌词 v1.0.7 安装版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.7/RiverXILee-Desktop-Lyrics_1.0.7_x64-setup.exe)
+- [RiverXILee桌面歌词 v1.0.7 便携版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/download/v1.0.7/RiverXILee-Desktop-Lyrics_1.0.7.exe)
 - [查看最新版本与更新说明](https://github.com/ShallowThoughts/RiverXILee-Music/releases/latest)
 
 ## 使用方法
@@ -29,6 +29,8 @@
 - 网易云音乐优先使用当前歌曲 ID 对应的网易云原生歌词与播放时钟；ID 暂时缺失时按歌名、歌手和时长在网易云内继续匹配
 - 其他音乐平台使用歌名、歌手、专辑和时长严格匹配在线 LRC 歌词
 - 歌词获取失败时自动重试，并拒绝错误歌手或时长明显不同的版本
+- 支持中文、英文、韩文等多语言歌曲；自动处理 `(Single Version)`、`(Remastered)` 等版本标签与括号信息
+- QQ 音乐与网易云音乐同时打开时，根据真实播放进度自动切换歌词，不再被空闲的旧媒体会话占用
 - 上一首、播放/暂停、下一首控制
 - 透明无边框窗口、始终置顶和全屏
 - 沉浸式五行布局：上两句、当前句、下两句
@@ -39,6 +41,7 @@
 - 换句时上浮、失焦与聚焦过渡
 - 鼠标穿透锁定与全局快捷键解锁
 - 适合明暗背景的歌词描边、阴影和逐行高亮
+- 当前行未唱文字使用更清晰的轻描边，减少浅色背景上的灰块和模糊重影
 
 ## 问题反馈
 

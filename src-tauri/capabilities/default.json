@@ -5,11 +5,15 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "autostart:default",
     {
       "identifier": "opener:allow-open-url",
       "allow": [
         {
           "url": "https://riverxilee-feedback.riverxilee.chatgpt.site/*"
+        },
+        {
+          "url": "https://github.com/ShallowThoughts/RiverXILee-Music/*"
         }
       ]
     }

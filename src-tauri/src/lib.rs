@@ -1,10 +1,20 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
-use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, Manager, WebviewWindow};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent,
+    menu::MenuBuilder,
+    tray::TrayIconBuilder,
+};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
@@ -15,6 +25,94 @@ mod netease;
 
 static MEDIA_MANAGER: OnceLock<GlobalSystemMediaTransportControlsSessionManager> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static SHORTCUT_ACTIONS: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowPlacement {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+fn state_file(app: &AppHandle, name: &str) -> Result<PathBuf, String> {
+    let directory = app.path().app_config_dir().map_err(error_text)?;
+    fs::create_dir_all(&directory).map_err(error_text)?;
+    Ok(directory.join(name))
+}
+
+fn save_window_placement(window: &WebviewWindow) -> Result<(), String> {
+    if window.is_fullscreen().map_err(error_text)? || window.is_maximized().map_err(error_text)? {
+        return Ok(());
+    }
+    let position = window.outer_position().map_err(error_text)?;
+    let size = window.outer_size().map_err(error_text)?;
+    let placement = WindowPlacement {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    };
+    let bytes = serde_json::to_vec_pretty(&placement).map_err(error_text)?;
+    fs::write(state_file(window.app_handle(), "window-placement.json")?, bytes)
+        .map_err(error_text)
+}
+
+fn restore_window_placement(window: &WebviewWindow) -> Result<(), String> {
+    let path = state_file(window.app_handle(), "window-placement.json")?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let placement: WindowPlacement =
+        serde_json::from_slice(&fs::read(path).map_err(error_text)?).map_err(error_text)?;
+    let width = placement.width.max(640);
+    let height = placement.height.max(280);
+    let saved_right = i64::from(placement.x) + i64::from(width);
+    let saved_bottom = i64::from(placement.y) + i64::from(height);
+    let is_visible = window
+        .available_monitors()
+        .map_err(error_text)?
+        .iter()
+        .any(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            let right = i64::from(position.x) + i64::from(size.width);
+            let bottom = i64::from(position.y) + i64::from(size.height);
+            saved_right > i64::from(position.x)
+                && i64::from(placement.x) < right
+                && saved_bottom > i64::from(position.y)
+                && i64::from(placement.y) < bottom
+        });
+    if is_visible {
+        window
+            .set_size(PhysicalSize::new(width, height))
+            .map_err(error_text)?;
+        window
+            .set_position(PhysicalPosition::new(placement.x, placement.y))
+            .map_err(error_text)?;
+    }
+    Ok(())
+}
+
+fn watch_window_placement(window: &WebviewWindow) {
+    let generation = Arc::new(AtomicU64::new(0));
+    let observed_window = window.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
+            return;
+        }
+        let generation = Arc::clone(&generation);
+        let window = observed_window.clone();
+        let current = generation.fetch_add(1, Ordering::Relaxed) + 1;
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            if generation.load(Ordering::Relaxed) == current {
+                let _ = save_window_placement(&window);
+            }
+        });
+    });
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +140,18 @@ struct LyricsResult {
     matched_artist: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LyricsCandidate {
+    provider: String,
+    id: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: i64,
+    score: i64,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateInfo {
@@ -49,6 +159,13 @@ struct UpdateInfo {
     current_version: String,
     latest_version: String,
     download_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaSessionInfo {
+    source: String,
+    is_playing: bool,
 }
 
 fn error_text(error: impl std::fmt::Display) -> String {
@@ -159,10 +276,30 @@ fn session_is_music_candidate(session: &GlobalSystemMediaTransportControlsSessio
     )
 }
 
-async fn active_media_session() -> Result<Option<GlobalSystemMediaTransportControlsSession>, String>
-{
+async fn active_media_session(
+    preferred_source: Option<&str>,
+) -> Result<Option<GlobalSystemMediaTransportControlsSession>, String> {
     let manager = media_manager().await?;
     let current = manager.GetCurrentSession().ok();
+    let wanted = preferred_source
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    if let Some(wanted) = wanted {
+        let sessions = manager.GetSessions().map_err(error_text)?;
+        for index in 0..sessions.Size().map_err(error_text)? {
+            let session = sessions.GetAt(index).map_err(error_text)?;
+            let source = session
+                .SourceAppUserModelId()
+                .map(|value| value.to_string().to_ascii_lowercase())
+                .unwrap_or_default();
+            if source == wanted && session_is_music_candidate(&session) {
+                return Ok(Some(session));
+            }
+        }
+        return Ok(None);
+    }
 
     if current
         .as_ref()
@@ -194,18 +331,47 @@ async fn active_media_session() -> Result<Option<GlobalSystemMediaTransportContr
 }
 
 #[tauri::command]
-async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
+async fn list_media_sessions() -> Result<Vec<MediaSessionInfo>, String> {
+    let manager = media_manager().await?;
+    let sessions = manager.GetSessions().map_err(error_text)?;
+    let mut result = Vec::new();
+    for index in 0..sessions.Size().map_err(error_text)? {
+        let session = sessions.GetAt(index).map_err(error_text)?;
+        if !session_is_music_candidate(&session) {
+            continue;
+        }
+        let source = session
+            .SourceAppUserModelId()
+            .map_err(error_text)?
+            .to_string();
+        if !result.iter().any(|item: &MediaSessionInfo| item.source == source) {
+            result.push(MediaSessionInfo {
+                source,
+                is_playing: session_is_playing(&session),
+            });
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSnapshot, String> {
     let captured_at_ms = now_ms();
     let mut netease_track = netease::current_track();
-    if netease_track.as_ref().is_some_and(|track| track.is_playing) {
+    let preferred_netease = preferred_source
+        .as_deref()
+        .is_some_and(|source| source.to_ascii_lowercase().contains("cloudmusic"));
+    if (preferred_source.is_none() || preferred_netease)
+        && netease_track.as_ref().is_some_and(|track| track.is_playing)
+    {
         return Ok(netease_media_snapshot(
             netease_track.take().expect("NetEase track should exist"),
             captured_at_ms,
         ));
     }
 
-    let Some(session) = active_media_session().await? else {
-        if let Some(track) = netease_track {
+    let Some(session) = active_media_session(preferred_source.as_deref()).await? else {
+        if (preferred_source.is_none() || preferred_netease) && let Some(track) = netease_track {
             return Ok(netease_media_snapshot(track, captured_at_ms));
         }
         return Ok(MediaSnapshot {
@@ -244,11 +410,11 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
         .LastUpdatedTime()
         .ok()
         .and_then(|value| timeline_timestamp_ms(value.UniversalTime));
-    if needs_netease_clock(&source) {
-        if let Some(netease_position_ms) = netease::current_position_ms() {
-            position_ms = netease_position_ms;
-            timeline_updated_at_ms = i64::try_from(captured_at_ms).ok();
-        }
+    if needs_netease_clock(&source)
+        && let Some(netease_position_ms) = netease::current_position_ms()
+    {
+        position_ms = netease_position_ms;
+        timeline_updated_at_ms = i64::try_from(captured_at_ms).ok();
     }
 
     let title = properties.Title().map_err(error_text)?.to_string();
@@ -285,8 +451,8 @@ async fn get_media_snapshot() -> Result<MediaSnapshot, String> {
 }
 
 #[tauri::command]
-async fn control_media(action: String) -> Result<bool, String> {
-    let Some(session) = active_media_session().await? else {
+async fn control_media(action: String, preferred_source: Option<String>) -> Result<bool, String> {
+    let Some(session) = active_media_session(preferred_source.as_deref()).await? else {
         return Ok(false);
     };
     let operation = match action.as_str() {
@@ -476,6 +642,7 @@ async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Option<S
             ("lv", "-1"),
             ("kv", "-1"),
             ("tv", "-1"),
+            ("yv", "-1"),
             ("os", "pc"),
         ])
         .send()
@@ -484,9 +651,10 @@ async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Option<S
         .error_for_status()
         .ok()?;
     let native = response.json::<Value>().await.ok()?;
-    native["lrc"]["lyric"]
+    native["yrc"]["lyric"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
+        .or_else(|| native["lrc"]["lyric"].as_str().filter(|value| !value.trim().is_empty()))
         .map(str::to_string)
 }
 
@@ -497,15 +665,16 @@ async fn fetch_netease_lyrics(
     duration_ms: i64,
     track_id: &str,
 ) -> Option<LyricsResult> {
-    if !track_id.is_empty() && track_id.chars().all(|character| character.is_ascii_digit()) {
-        if let Some(lrc) = fetch_netease_lrc(client, track_id).await {
-            return Some(LyricsResult {
-                lrc,
-                song_mid: format!("netease:{track_id}"),
-                matched_title: title.to_string(),
-                matched_artist: artist.to_string(),
-            });
-        }
+    if !track_id.is_empty()
+        && track_id.chars().all(|character| character.is_ascii_digit())
+        && let Some(lrc) = fetch_netease_lrc(client, track_id).await
+    {
+        return Some(LyricsResult {
+            lrc,
+            song_mid: format!("netease:{track_id}"),
+            matched_title: title.to_string(),
+            matched_artist: artist.to_string(),
+        });
     }
 
     let mut tried_ids = HashSet::new();
@@ -575,6 +744,125 @@ fn decode_entities(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
+async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Option<String> {
+    let response = client
+        .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
+        .header("Referer", "https://y.qq.com/")
+        .query(&[
+            ("songmid", song_mid),
+            ("format", "json"),
+            ("nobase64", "1"),
+            ("g_tk", "5381"),
+        ])
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let lyric = response.json::<Value>().await.ok()?;
+    lyric["lyric"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(decode_entities)
+}
+
+#[tauri::command]
+async fn search_lyrics_candidates(
+    title: String,
+    artist: String,
+    album: String,
+    duration_ms: i64,
+) -> Result<Vec<LyricsCandidate>, String> {
+    if title.trim().is_empty() {
+        return Err("当前歌曲没有可用于搜索的标题".to_string());
+    }
+    let client = HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.0")
+            .build()
+            .expect("HTTP client should initialize")
+    });
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+
+    for query in lyric_search_queries(&title, &artist).into_iter().take(2) {
+        if let Some(response) = client
+            .get("https://music.163.com/api/search/get/web")
+            .header("Referer", "https://music.163.com/")
+            .query(&[("s", query.as_str()), ("type", "1"), ("limit", "12"), ("offset", "0")])
+            .send().await.ok().and_then(|response| response.error_for_status().ok())
+            && let Ok(search) = response.json::<Value>().await
+            && let Some(candidates) = search["result"]["songs"].as_array()
+        {
+            for item in candidates {
+                let Some(id) = item["id"].as_i64().map(|id| id.to_string()) else { continue };
+                if !seen.insert(format!("netease:{id}")) { continue; }
+                results.push(LyricsCandidate {
+                    provider: "netease".to_string(),
+                    id,
+                    title: item["name"].as_str().unwrap_or_default().to_string(),
+                    artist: netease_artist(item),
+                    album: item["album"]["name"].as_str().unwrap_or_default().to_string(),
+                    duration_ms: item["duration"].as_i64().unwrap_or_default(),
+                    score: netease_candidate_score(item, &title, &artist, duration_ms).max(0),
+                });
+            }
+        }
+
+        if let Some(response) = client
+            .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
+            .header("Referer", "https://y.qq.com/")
+            .query(&[("p", "1"), ("n", "12"), ("w", query.as_str()), ("format", "json")])
+            .send().await.ok().and_then(|response| response.error_for_status().ok())
+            && let Ok(search) = response.json::<Value>().await
+            && let Some(candidates) = search["data"]["song"]["list"].as_array()
+        {
+            for item in candidates {
+                let Some(id) = item["songmid"].as_str().filter(|id| !id.is_empty()) else { continue };
+                if !seen.insert(format!("qq:{id}")) { continue; }
+                let item_artist = item["singer"].as_array().map(|singers| {
+                    singers.iter().filter_map(|singer| singer["name"].as_str()).collect::<Vec<_>>().join(" / ")
+                }).unwrap_or_default();
+                results.push(LyricsCandidate {
+                    provider: "qq".to_string(),
+                    id: id.to_string(),
+                    title: item["songname"].as_str().unwrap_or_default().to_string(),
+                    artist: item_artist,
+                    album: item["albumname"].as_str().unwrap_or_default().to_string(),
+                    duration_ms: item["interval"].as_i64().unwrap_or_default() * 1_000,
+                    score: candidate_score(item, &title, &artist, &album, duration_ms).max(0),
+                });
+            }
+        }
+    }
+    results.sort_by_key(|candidate| std::cmp::Reverse(candidate.score));
+    results.truncate(20);
+    Ok(results)
+}
+
+#[tauri::command]
+async fn fetch_lyrics_candidate(
+    provider: String,
+    id: String,
+    title: String,
+    artist: String,
+) -> Result<LyricsResult, String> {
+    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
+    let lrc = match provider.as_str() {
+        "netease" => fetch_netease_lrc(client, &id).await,
+        "qq" => fetch_qq_lrc(client, &id).await,
+        _ => return Err("不支持的歌词来源".to_string()),
+    }
+    .ok_or_else(|| "这个版本没有可用的时间轴歌词".to_string())?;
+    Ok(LyricsResult {
+        lrc,
+        song_mid: format!("{provider}:{id}"),
+        matched_title: title,
+        matched_artist: artist,
+    })
+}
+
 fn version_numbers(value: &str) -> Vec<u64> {
     value
         .trim()
@@ -611,7 +899,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.7")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.0")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -671,16 +959,15 @@ async fn fetch_lyrics(
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.0.7")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.0")
             .build()
             .expect("HTTP client should initialize")
     });
-    if source.to_ascii_lowercase().contains("cloudmusic") {
-        if let Some(result) =
+    if source.to_ascii_lowercase().contains("cloudmusic")
+        && let Some(result) =
             fetch_netease_lyrics(client, &title, &artist, duration_ms, &track_id).await
-        {
-            return Ok(result);
-        }
+    {
+        return Ok(result);
     }
     let mut tried_song_mids = HashSet::new();
     for query in lyric_search_queries(&title, &artist) {
@@ -728,31 +1015,7 @@ async fn fetch_lyrics(
             if !tried_song_mids.insert(song_mid.to_string()) {
                 continue;
             }
-            let Some(response) = client
-                .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
-                .header("Referer", "https://y.qq.com/")
-                .query(&[
-                    ("songmid", song_mid),
-                    ("format", "json"),
-                    ("nobase64", "1"),
-                    ("g_tk", "5381"),
-                ])
-                .send()
-                .await
-                .ok()
-                .and_then(|response| response.error_for_status().ok())
-            else {
-                continue;
-            };
-            let Ok(lyric) = response.json::<Value>().await else {
-                continue;
-            };
-            let Some(lrc) = lyric["lyric"]
-                .as_str()
-                .filter(|value| !value.trim().is_empty())
-            else {
-                continue;
-            };
+            let Some(lrc) = fetch_qq_lrc(client, song_mid).await else { continue };
             let matched_artist = candidate["singer"]
                 .as_array()
                 .map(|singers| {
@@ -765,7 +1028,7 @@ async fn fetch_lyrics(
                 .unwrap_or_default();
 
             return Ok(LyricsResult {
-                lrc: decode_entities(lrc),
+                lrc,
                 song_mid: song_mid.to_string(),
                 matched_title: candidate["songname"].as_str().unwrap_or(&title).to_string(),
                 matched_artist,
@@ -852,10 +1115,10 @@ mod tests {
 
     #[test]
     fn compares_release_versions_numerically() {
-        assert!(super::is_newer_version("v1.0.8", "1.0.7"));
+        assert!(super::is_newer_version("v1.1.1", "1.1.0"));
         assert!(super::is_newer_version("1.10.0", "1.9.9"));
-        assert!(!super::is_newer_version("v1.0.7", "1.0.7"));
-        assert!(!super::is_newer_version("1.0.6", "1.0.7"));
+        assert!(!super::is_newer_version("v1.1.0", "1.1.0"));
+        assert!(!super::is_newer_version("1.0.9", "1.1.0"));
     }
 
     #[test]
@@ -863,7 +1126,7 @@ mod tests {
     fn reads_the_live_github_release_feed() {
         let update = tauri::async_runtime::block_on(super::check_for_update())
             .expect("GitHub latest release should be readable");
-        assert_eq!(update.current_version, "1.0.7");
+        assert_eq!(update.current_version, "1.1.0");
         assert!(!update.latest_version.is_empty());
         assert!(update.download_url.starts_with("https://github.com/"));
     }
@@ -955,12 +1218,40 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "live manual lyric candidate regression check"]
+    fn searches_and_fetches_manual_lyric_candidates() {
+        tauri::async_runtime::block_on(async {
+            let candidates = super::search_lyrics_candidates(
+                "Supernova".to_string(),
+                "aespa".to_string(),
+                "Supernova".to_string(),
+                178_000,
+            )
+            .await
+            .expect("candidate search should succeed");
+            let candidate = candidates
+                .into_iter()
+                .find(|candidate| candidate.score >= 220)
+                .expect("an exact candidate should be present");
+            let result = super::fetch_lyrics_candidate(
+                candidate.provider,
+                candidate.id,
+                candidate.title,
+                candidate.artist,
+            )
+            .await
+            .expect("selected candidate should have timed lyrics");
+            assert!(!result.lrc.trim().is_empty());
+        });
+    }
+
+    #[test]
     #[ignore = "live dual-player selection regression check"]
     fn prefers_advancing_netease_over_an_idle_qq_music_session() {
         let snapshot = tauri::async_runtime::block_on(async {
-            let _ = super::get_media_snapshot().await;
+            let _ = super::get_media_snapshot(None).await;
             std::thread::sleep(std::time::Duration::from_millis(900));
-            super::get_media_snapshot()
+            super::get_media_snapshot(None)
                 .await
                 .expect("media snapshot should be available")
         });
@@ -1035,7 +1326,8 @@ fn minimize_window(window: WebviewWindow) -> Result<(), String> {
 
 #[tauri::command]
 fn close_window(window: WebviewWindow) -> Result<(), String> {
-    window.close().map_err(error_text)
+    save_window_placement(&window)?;
+    window.hide().map_err(error_text)
 }
 
 #[tauri::command]
@@ -1043,36 +1335,166 @@ fn start_dragging(window: WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(error_text)
 }
 
+#[tauri::command]
+fn set_window_visible(window: WebviewWindow, visible: bool) -> Result<(), String> {
+    if visible {
+        window.show().map_err(error_text)?;
+        window.set_focus().map_err(error_text)
+    } else {
+        save_window_placement(&window)?;
+        window.hide().map_err(error_text)
+    }
+}
+
+#[tauri::command]
+fn load_preferences(app: AppHandle) -> Result<Option<Value>, String> {
+    let path = state_file(&app, "preferences.json")?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value = serde_json::from_slice(&fs::read(path).map_err(error_text)?)
+        .map_err(error_text)?;
+    Ok(Some(value))
+}
+
+#[tauri::command]
+fn save_preferences(app: AppHandle, preferences: Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(&preferences).map_err(error_text)?;
+    fs::write(state_file(&app, "preferences.json")?, bytes).map_err(error_text)
+}
+
+#[tauri::command]
+fn set_global_shortcuts(
+    app: AppHandle,
+    shortcuts: HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let mut parsed = Vec::new();
+    let mut seen = HashSet::new();
+    for (action, value) in shortcuts {
+        let shortcut = Shortcut::from_str(value.trim())
+            .map_err(|_| format!("快捷键格式无效：{value}"))?;
+        if !seen.insert(shortcut.id()) {
+            return Err(format!("快捷键重复：{value}"));
+        }
+        parsed.push((shortcut, action));
+    }
+
+    let manager = app.global_shortcut();
+    manager.unregister_all().map_err(error_text)?;
+    let mut unavailable = Vec::new();
+    let mut registered = HashMap::new();
+    for (shortcut, action) in parsed {
+        if manager.register(shortcut).is_ok() {
+            registered.insert(shortcut.id(), action);
+        } else {
+            unavailable.push(action);
+        }
+    }
+    let actions = SHORTCUT_ACTIONS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut actions = actions.lock().map_err(|_| "无法保存快捷键".to_string())?;
+    actions.clear();
+    actions.extend(registered);
+    Ok(unavailable)
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            let _ = app.emit("single-instance-activated", ());
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("RiverXILee桌面歌词")
+                .build(),
+        )
+        .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
+                .with_handler(|app, shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.set_ignore_cursor_events(false);
-                            let _ = window.emit("overlay-unlocked", ());
+                        let action = SHORTCUT_ACTIONS
+                            .get_or_init(|| Mutex::new(HashMap::new()))
+                            .lock()
+                            .ok()
+                            .and_then(|actions| actions.get(&shortcut.id()).cloned());
+                        if let Some(action) = action {
+                            let _ = app.emit("global-shortcut", action);
                         }
                     }
                 })
                 .build(),
         )
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                restore_window_placement(&window)?;
+                watch_window_placement(&window);
+            }
             let _ = app.global_shortcut().register("Ctrl+Shift+L");
+            if let Ok(shortcut) = Shortcut::from_str("Ctrl+Shift+L") {
+                SHORTCUT_ACTIONS
+                    .get_or_init(|| Mutex::new(HashMap::new()))
+                    .lock()
+                    .expect("shortcut actions should initialize")
+                    .insert(shortcut.id(), "toggleLock".to_string());
+            }
+            let tray_menu = MenuBuilder::new(app)
+                .text("toggle-visibility", "显示或隐藏歌词")
+                .text("toggle-lock", "锁定或解锁")
+                .text("resync", "重新同步")
+                .separator()
+                .text("quit", "退出 RiverXILee桌面歌词")
+                .build()?;
+            let mut tray = TrayIconBuilder::new()
+                .menu(&tray_menu)
+                .tooltip("RiverXILee桌面歌词")
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "toggle-visibility" => {
+                        let _ = app.emit("global-shortcut", "toggleVisibility");
+                    }
+                    "toggle-lock" => {
+                        let _ = app.emit("global-shortcut", "toggleLock");
+                    }
+                    "resync" => {
+                        let _ = app.emit("global-shortcut", "resync");
+                    }
+                    "quit" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = save_window_placement(&window);
+                        }
+                        app.exit(0);
+                    }
+                    _ => {}
+                });
+            if let Some(icon) = app.default_window_icon() {
+                tray = tray.icon(icon.clone());
+            }
+            tray.build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_media_snapshot,
+            list_media_sessions,
             control_media,
             fetch_lyrics,
+            search_lyrics_candidates,
+            fetch_lyrics_candidate,
             check_for_update,
             set_always_on_top,
             set_fullscreen,
             set_click_through,
             minimize_window,
             close_window,
-            start_dragging
+            start_dragging,
+            set_window_visible,
+            load_preferences,
+            save_preferences,
+            set_global_shortcuts
         ])
         .run(tauri::generate_context!())
         .expect("failed to run RiverXILee桌面歌词");

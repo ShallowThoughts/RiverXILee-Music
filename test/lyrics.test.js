@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { findActiveLine, lineProgress, parseLrc, visibleLineIndices } from "../src/lyrics.js";
+import { findActiveLine, lineProgress, parseLrc, visibleLineIndices, wordProgress } from "../src/lyrics.js";
+import {
+  DEFAULT_SHORTCUTS,
+  clampLyricOffset,
+  duplicateShortcut,
+  normalizeShortcut,
+  sanitizeShortcuts,
+} from "../src/preferences.js";
 import {
   DEFAULT_DISPLAY_SETTINGS,
   hexToRgb,
@@ -35,6 +42,32 @@ test("calculates a clamped line progress", () => {
   assert.equal(lineProgress(lines, 0, 2_000, 5_000), 0.5);
   assert.equal(lineProgress(lines, 0, 6_000, 5_000), 1);
   assert.equal(lineProgress([{ timeMs: 1_000, text: "A" }], 0, 3_500, 0), 0.5);
+});
+
+test("parses NetEase YRC and QQ enhanced word timestamps", () => {
+  assert.deepEqual(parseLrc("{1000,1200,0}(1000,400,0)你(1400,800,0)好"), [{
+    timeMs: 1_000,
+    durationMs: 1_200,
+    text: "你好",
+    words: [
+      { timeMs: 1_000, durationMs: 400, text: "你" },
+      { timeMs: 1_400, durationMs: 800, text: "好" },
+    ],
+  }]);
+  assert.equal(parseLrc("[1000,900]<1000,300,0>Hello <1300,600,0>world")[0].text, "Hello world");
+  assert.equal(parseLrc("[0,1000](0,1000,0) 作词 : 赵雷")[0].text, "作词 : 赵雷");
+  assert.equal(wordProgress({ timeMs: 1_000, durationMs: 400 }, 1_200), 0.5);
+});
+
+test("normalizes, validates and de-duplicates custom shortcuts", () => {
+  assert.equal(normalizeShortcut("shift + ctrl + l"), "Ctrl+Shift+L");
+  const shortcuts = sanitizeShortcuts({ toggleLock: "Alt+K" });
+  assert.equal(shortcuts.toggleLock, "Alt+K");
+  assert.equal(shortcuts.resync, DEFAULT_SHORTCUTS.resync);
+  shortcuts.resync = "Alt+K";
+  assert.equal(duplicateShortcut(shortcuts, "resync"), "toggleLock");
+  assert.equal(clampLyricOffset(10_999), 10_000);
+  assert.equal(clampLyricOffset(-549), -500);
 });
 
 test("sanitizes persisted display settings", () => {

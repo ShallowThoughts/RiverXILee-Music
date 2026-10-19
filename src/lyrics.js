@@ -1,4 +1,7 @@
 const TIME_TAG = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+const YRC_LINE = /^\{(\d+),(\d+)(?:,[^}]*)?\}(.*)$/;
+const QRC_LINE = /^\[(\d+),(\d+)\](.*)$/;
+const WORD_TAG = /[<(](\d+),(\d+)(?:,[^)>]*)?[)>]([^<(]*)/g;
 
 function fractionToMilliseconds(value = "0") {
   if (value.length === 1) return Number(value) * 100;
@@ -13,6 +16,28 @@ export function parseLrc(source) {
 
   const entries = [];
   for (const rawLine of source.replace(/\r/g, "").split("\n")) {
+    const enhanced = rawLine.match(YRC_LINE) ?? rawLine.match(QRC_LINE);
+    if (enhanced) {
+      const lineStart = Number(enhanced[1]);
+      const lineDuration = Number(enhanced[2]);
+      const words = [...enhanced[3].matchAll(WORD_TAG)]
+        .map((match) => ({
+          timeMs: Number(match[1]) + offset,
+          durationMs: Number(match[2]),
+          text: match[3],
+        }))
+        .filter((word) => word.text);
+      const text = words.map((word) => word.text).join("").trim();
+      if (text) {
+        entries.push({
+          timeMs: Math.max(0, lineStart + offset),
+          durationMs: lineDuration,
+          text,
+          words,
+        });
+      }
+      continue;
+    }
     const timestamps = [...rawLine.matchAll(TIME_TAG)];
     if (!timestamps.length) continue;
 
@@ -36,6 +61,11 @@ export function parseLrc(source) {
       (entry, index, all) =>
         index === 0 || entry.timeMs !== all[index - 1].timeMs || entry.text !== all[index - 1].text,
     );
+}
+
+export function wordProgress(word, positionMs) {
+  if (!word || word.durationMs <= 0) return positionMs >= (word?.timeMs ?? Infinity) ? 1 : 0;
+  return Math.min(1, Math.max(0, (positionMs - word.timeMs) / word.durationMs));
 }
 
 export function findActiveLine(lines, positionMs) {

@@ -20,6 +20,7 @@ import {
   DEFAULT_DISPLAY_SETTINGS,
   DISPLAY_PRESETS,
   hexToRgb,
+  lyricFontFamily,
   rgbToHex,
   sanitizeDisplaySettings,
 } from "./settings.js";
@@ -508,7 +509,7 @@ function syncSettingsPanel() {
 
 function applyDisplaySettings({ rerender = true } = {}) {
   const display = state.display;
-  const secondarySize = Math.max(14, Math.round(display.fontSize * 0.42));
+  const secondarySize = Math.max(18, Math.round(display.fontSize * 0.54));
   const stackHeight = display.fontSize
     + Math.max(0, display.lineCount - 1) * secondarySize
     + Math.max(0, display.lineCount - 1) * display.lineGap
@@ -520,11 +521,9 @@ function applyDisplaySettings({ rerender = true } = {}) {
   root.style.setProperty("--lyrics-offset-x", `${display.offsetX}vw`);
   root.style.setProperty("--lyrics-offset-y", `${display.offsetY}vh`);
   root.style.setProperty("--lyrics-stack-height", `${stackHeight}px`);
-  const fontFamily = display.fontFamily.replace(/["'\\]/g, "");
-  root.style.setProperty(
-    "--lyric-font-family",
-    `"${fontFamily}", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif`,
-  );
+  const fontFamily = lyricFontFamily(display.fontFamily);
+  root.style.setProperty("--lyric-font-family", fontFamily);
+  elements.stack.style.setProperty("font-family", fontFamily, "important");
   root.style.setProperty(
     "--karaoke-color",
     `rgb(${display.color.r} ${display.color.g} ${display.color.b})`,
@@ -722,12 +721,20 @@ function renderLyricWindow(activeIndex) {
     return;
   }
 
-  elements.stack.replaceChildren();
+  const previousActiveIndex = Number(
+    elements.stack.querySelector(".current-line[data-index]")?.dataset.index ?? -1,
+  );
+  const previousRects = new Map(
+    [...elements.stack.querySelectorAll(".lyric-line[data-index]")]
+      .map((line) => [Number(line.dataset.index), line.getBoundingClientRect()]),
+  );
+  const fragment = document.createDocumentFragment();
   const visibleIndices = visibleLineIndices(state.lines.length, activeIndex, state.display.lineCount);
 
   for (const index of visibleIndices) {
     const line = document.createElement("div");
     line.className = "lyric-line";
+    line.style.setProperty("font-family", "var(--lyric-font-family)", "important");
     line.dataset.index = String(index);
     const distance = index - activeIndex;
     line.dataset.distance = String(Math.max(-2, Math.min(2, distance)));
@@ -769,8 +776,76 @@ function renderLyricWindow(activeIndex) {
       line.classList.add(index < activeIndex ? "history-line" : "next-line");
       line.textContent = state.lines[index].text;
     }
-    elements.stack.append(line);
+    fragment.append(line);
   }
+  elements.stack.replaceChildren(fragment);
+  animateLyricWindow(previousRects, previousActiveIndex, activeIndex);
+}
+
+function playLyricAnimation(element, keyframes, options) {
+  const animation = element.animate(keyframes, options);
+  animation.finished.catch(() => {}).finally(() => animation.cancel());
+}
+
+function animateLyricWindow(previousRects, previousActiveIndex, activeIndex) {
+  const effect = state.display.motionEffect;
+  if (effect === "none" || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+  const flowing = effect === "flow";
+  const direction = previousActiveIndex >= 0 && activeIndex < previousActiveIndex ? -1 : 1;
+  const duration = flowing ? 620 : 420;
+  const easing = flowing ? "cubic-bezier(0.2, 0.9, 0.2, 1)" : "cubic-bezier(0.16, 1, 0.3, 1)";
+
+  for (const line of elements.stack.querySelectorAll(".lyric-line[data-index]")) {
+    const index = Number(line.dataset.index);
+    const previousRect = previousRects.get(index);
+    if (previousRect) {
+      const deltaY = previousRect.top - line.getBoundingClientRect().top;
+      if (Math.abs(deltaY) > 0.5) {
+        const frames = flowing
+          ? [
+              { translate: `0 ${deltaY}px`, filter: "blur(1.8px)" },
+              { translate: "0 -2px", filter: "blur(0)" },
+              { translate: "0 0", filter: "blur(0)" },
+            ]
+          : [
+              { translate: `0 ${deltaY}px` },
+              { translate: "0 0" },
+            ];
+        playLyricAnimation(line, frames, { duration, easing, fill: "both" });
+      }
+      continue;
+    }
+
+    const entryDistance = flowing ? 34 : 22;
+    playLyricAnimation(line, [
+      {
+        opacity: 0,
+        translate: `0 ${entryDistance * direction}px`,
+        filter: flowing ? "blur(7px)" : "blur(2px)",
+      },
+      { opacity: 1, translate: "0 0", filter: "blur(0)" },
+    ], { duration: flowing ? 520 : 360, easing, fill: "both" });
+  }
+
+  if (activeIndex === previousActiveIndex) return;
+  const currentText = elements.stack.querySelector(".current-text");
+  if (!currentText) return;
+  const focusFrames = flowing
+    ? [
+        { opacity: 0.45, transform: "translateY(8px) scale(0.965)", filter: "blur(5px)" },
+        { opacity: 1, transform: "translateY(-1px) scale(1.012)", filter: "blur(0)" },
+        { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
+      ]
+    : [
+        { opacity: 0.58, transform: "translateY(5px) scale(0.985)", filter: "blur(2px)" },
+        { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
+      ];
+  playLyricAnimation(currentText, focusFrames, {
+    duration: flowing ? 640 : 460,
+    easing,
+    fill: "both",
+  });
 }
 
 function updateConnectionUi() {
@@ -941,8 +1016,11 @@ function animationFrame() {
     if (activeLine?.words?.length) {
       for (const [wordIndex, word] of activeLine.words.entries()) {
         const value = wordProgress(word, lyricPosition);
-        elements.stack.querySelector(`[data-word-index="${wordIndex}"]`)
-          ?.style.setProperty("--word-progress", `${(value * 100).toFixed(2)}%`);
+        const wordElement = elements.stack.querySelector(`[data-word-index="${wordIndex}"]`);
+        wordElement?.style.setProperty("--word-progress", `${(value * 100).toFixed(2)}%`);
+        const emphasis = value > 0 && value < 1 ? Math.sin(Math.PI * value) : 0;
+        wordElement?.style.setProperty("--word-lift", `${(-1.5 * emphasis).toFixed(2)}px`);
+        wordElement?.style.setProperty("--word-scale", (1 + 0.035 * emphasis).toFixed(4));
       }
     }
   }

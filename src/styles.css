@@ -466,9 +466,10 @@ button {
 .lyric-line {
   max-width: 100%;
   overflow: visible;
-  color: rgba(244, 248, 247, 0.42);
+  color: rgba(244, 248, 247, 0.62);
   font-size: var(--secondary-font-size);
-  font-weight: 560;
+  font-family: var(--lyric-font-family) !important;
+  font-weight: 620;
   letter-spacing: -0.012em;
   line-height: 1.3;
   text-overflow: clip;
@@ -476,12 +477,7 @@ button {
   -webkit-text-stroke: 0.2px rgba(4, 8, 10, 0.54);
   white-space: normal;
   text-wrap: balance;
-  transition: opacity 280ms ease, transform 440ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.lyrics-stack[data-motion="soft"] .lyric-line,
-.lyrics-stack[data-motion="flow"] .lyric-line {
-  animation: lyric-row-in 440ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  transition: opacity 260ms ease, transform 420ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .current-line {
@@ -491,21 +487,14 @@ button {
   place-items: center;
   color: rgba(255, 255, 255, 0.99);
   font-size: var(--lyric-font-size);
-  font-weight: 700;
+  font-family: var(--lyric-font-family) !important;
+  font-weight: 720;
   letter-spacing: -0.025em;
   line-height: 1.13;
   overflow: visible;
   text-shadow: none;
   -webkit-text-stroke: 0;
   transform: translateZ(0);
-}
-
-.lyrics-stack[data-motion="soft"] .current-line {
-  animation: lyric-focus-in 560ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.lyrics-stack[data-motion="flow"] .current-line {
-  animation: lyric-liquid-focus 660ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .current-text {
@@ -518,6 +507,15 @@ button {
   -webkit-font-smoothing: antialiased;
   white-space: normal;
   text-wrap: balance;
+}
+
+.current-text,
+.current-text-base,
+.current-text-highlight,
+.karaoke-word,
+.karaoke-word-base,
+.karaoke-word-highlight {
+  font-family: var(--lyric-font-family) !important;
 }
 
 .current-text-base,
@@ -541,12 +539,27 @@ button {
   background: var(--karaoke-color);
   background-clip: text;
   -webkit-background-clip: text;
-  clip-path: inset(0 calc(100% - var(--karaoke-progress)) 0 0);
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 calc(var(--karaoke-progress) - 5%),
+    rgba(0, 0, 0, 0.82) var(--karaoke-progress),
+    transparent calc(var(--karaoke-progress) + 3%),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 calc(var(--karaoke-progress) - 5%),
+    rgba(0, 0, 0, 0.82) var(--karaoke-progress),
+    transparent calc(var(--karaoke-progress) + 3%),
+    transparent 100%
+  );
   text-shadow: none;
   -webkit-text-fill-color: transparent;
   -webkit-text-stroke: 0;
   pointer-events: none;
-  transition: clip-path 80ms linear;
+  transition: background-position 100ms linear;
 }
 
 .current-text[data-effect="rgb"] .current-text-highlight {
@@ -572,8 +585,13 @@ button {
 
 .karaoke-word {
   --word-progress: 0%;
+  --word-lift: 0px;
+  --word-scale: 1;
   position: relative;
   display: inline-grid;
+  transform: translateY(var(--word-lift)) scale(var(--word-scale));
+  transform-origin: center 78%;
+  will-change: transform;
 }
 
 .karaoke-word-base,
@@ -594,7 +612,22 @@ button {
   background: var(--karaoke-color);
   background-clip: text;
   -webkit-background-clip: text;
-  clip-path: inset(0 calc(100% - var(--word-progress)) 0 0);
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 calc(var(--word-progress) - 14%),
+    rgba(0, 0, 0, 0.82) var(--word-progress),
+    transparent calc(var(--word-progress) + 12%),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 calc(var(--word-progress) - 14%),
+    rgba(0, 0, 0, 0.82) var(--word-progress),
+    transparent calc(var(--word-progress) + 12%),
+    transparent 100%
+  );
   -webkit-text-fill-color: transparent;
   pointer-events: none;
 }
@@ -611,7 +644,7 @@ button {
   background-size: 220% 100%;
   background-position: var(--word-progress) 50%;
   filter: drop-shadow(0 1px 1px rgba(3, 9, 12, 0.5));
-  transition: clip-path 60ms linear, background-position 110ms linear;
+  transition: background-position 90ms linear;
 }
 
 .next-line {
@@ -624,59 +657,19 @@ button {
 
 .lyric-line[data-distance="-1"],
 .lyric-line[data-distance="1"] {
-  opacity: 0.76;
+  opacity: 0.82;
   transform: scale(0.97);
 }
 
 .lyric-line[data-distance="-2"],
 .lyric-line[data-distance="2"] {
-  opacity: 0.52;
+  opacity: 0.62;
   transform: scale(0.93);
-}
-
-@keyframes lyric-focus-in {
-  from {
-    opacity: 0;
-    transform: translateY(18px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes lyric-liquid-focus {
-  from {
-    opacity: 0.18;
-    transform: translateY(22px) scale(0.97);
-    filter: blur(7px) saturate(0.7);
-    clip-path: inset(18% 8% 18% 8% round 18px);
-  }
-  58% {
-    opacity: 1;
-    filter: blur(0.8px) saturate(1.12);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: blur(0) saturate(1);
-    clip-path: inset(0 0 0 0 round 0);
-  }
 }
 
 .lyrics-stack[data-motion="none"] .lyric-line,
 .lyrics-stack[data-motion="none"] .current-line {
   animation: none;
-}
-
-@keyframes lyric-row-in {
-  from {
-    opacity: 0;
-    translate: 0 18px;
-  }
-  to {
-    translate: 0 0;
-  }
 }
 
 .empty-state {

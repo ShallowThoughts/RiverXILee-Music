@@ -44,6 +44,11 @@ function sanitizeFontFamily(value) {
   return family.slice(0, 80) || DEFAULT_DISPLAY_SETTINGS.fontFamily;
 }
 
+export function lyricFontFamily(value) {
+  const family = sanitizeFontFamily(value).replace(/["'\\]/g, "");
+  return `"${family}", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif`;
+}
+
 export function sanitizeDisplaySettings(value = {}) {
   const color = value.color ?? {};
   return {

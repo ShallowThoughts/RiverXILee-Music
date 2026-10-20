@@ -34,3 +34,23 @@ export function playbackPosition(anchor, now) {
     anchor.durationMs,
   );
 }
+
+export function reconcilePlaybackAnchor(current, snapshot, receivedAt, receivedAtEpoch) {
+  const target = playbackAnchor(snapshot, receivedAt, receivedAtEpoch);
+  const currentPosition = playbackPosition(current, receivedAt);
+  const driftMs = target.positionMs - currentPosition;
+  const stateChanged = current.isPlaying !== target.isPlaying
+    || Math.abs((current.durationMs ?? 0) - target.durationMs) > 1_000;
+  const shouldSnap = stateChanged || Math.abs(driftMs) >= 1_500;
+  const correction = shouldSnap ? driftMs : Math.max(-120, Math.min(120, driftMs));
+
+  return {
+    anchor: {
+      ...target,
+      positionMs: clampPosition(currentPosition + correction, target.durationMs),
+      syncedAt: receivedAt,
+    },
+    driftMs: Math.round(driftMs),
+    correction: shouldSnap ? "snap" : Math.abs(driftMs) >= 80 ? "smooth" : "steady",
+  };
+}

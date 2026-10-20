@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { findActiveLine, lineProgress, parseLrc, visibleLineIndices, wordProgress } from "../src/lyrics.js";
+import { buildDiagnosticReport, lyricProvider, lyricTimingType } from "../src/diagnostics.js";
 import {
   DEFAULT_SHORTCUTS,
   clampLyricOffset,
@@ -9,6 +10,7 @@ import {
   sanitizeShortcuts,
 } from "../src/preferences.js";
 import {
+  applyDisplayPreset,
   DEFAULT_DISPLAY_SETTINGS,
   hexToRgb,
   rgbToHex,
@@ -70,6 +72,48 @@ test("normalizes, validates and de-duplicates custom shortcuts", () => {
   assert.equal(clampLyricOffset(-549), -500);
 });
 
+test("display presets preserve color while changing layout and font family", () => {
+  const current = sanitizeDisplaySettings({
+    color: { r: 9, g: 8, b: 7 },
+    fontFamily: "Microsoft YaHei UI",
+  });
+  const result = applyDisplayPreset(current, "game");
+  assert.equal(result.lineCount, 2);
+  assert.equal(result.offsetY, 28);
+  assert.deepEqual(result.color, { r: 9, g: 8, b: 7 });
+  assert.equal(result.fontFamily, "Microsoft YaHei UI");
+});
+
+test("diagnostic report names lyric source, timing and recovery state", () => {
+  assert.equal(lyricProvider({ songMid: "netease:123" }), "网易云音乐");
+  assert.equal(lyricTimingType([{ text: "Hi", words: [{ text: "Hi" }] }]), "逐字歌词");
+  const report = buildDiagnosticReport({
+    version: "1.1.1",
+    connected: true,
+    isPlaying: true,
+    source: "cloudmusic.exe",
+    title: "我要的",
+    artist: "测试歌手",
+    album: "测试专辑",
+    positionMs: 65_000,
+    durationMs: 185_000,
+    lyricStatus: "ready",
+    lyricMatch: { songMid: "netease:123" },
+    lines: [{ text: "Hi", words: [{ text: "Hi" }] }],
+    lyricFromCache: true,
+    lyricOffsetMs: 500,
+    syncDriftMs: -90,
+    syncCorrection: "smooth",
+    mediaPollFailures: 0,
+    availableSources: [{ source: "cloudmusic.exe", isPlaying: true }],
+    platformName: () => "网易云音乐",
+  });
+  assert.match(report, /播放进度：01:05 \/ 03:05/);
+  assert.match(report, /歌词来源：网易云音乐/);
+  assert.match(report, /正在使用缓存/);
+  assert.match(report, /同步误差：-90 ms/);
+});
+
 test("sanitizes persisted display settings", () => {
   assert.deepEqual(
     sanitizeDisplaySettings({
@@ -87,6 +131,7 @@ test("sanitizes persisted display settings", () => {
       lineGap: 56,
       offsetX: -40,
       offsetY: 35,
+      fontFamily: "Segoe UI Variable Display",
       colorEffect: "rgb",
       color: { r: 0, g: 128, b: 255 },
     },

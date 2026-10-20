@@ -1,6 +1,6 @@
 [package]
 name = "riverxilee-desktop-lyrics"
-version = "1.1.0"
+version = "1.1.1"
 description = "Transparent multi-platform desktop lyrics overlay for Windows"
 authors = ["RiverXILee"]
 edition = "2024"
@@ -25,6 +25,7 @@ tauri-plugin-opener = "2.5.0"
 tauri-plugin-single-instance = "=2.4.0"
 windows = { version = "0.62.2", features = [
   "Foundation",
+  "Win32_Graphics_Gdi",
   "Media_Control",
   "Win32_Foundation",
   "Win32_System_Diagnostics_Debug",

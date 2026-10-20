@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { playbackAnchor, playbackPosition } from "../src/playback.js";
+import { playbackAnchor, playbackPosition, reconcilePlaybackAnchor } from "../src/playback.js";
 
 const epoch = 1_780_000_000_000;
 function snapshot(overrides = {}) {
@@ -25,6 +25,44 @@ test("polling the same cached timeline does not rewind the clock", () => {
   const first = playbackAnchor(snapshot(), 100, epoch + 5_000);
   const next = playbackAnchor(snapshot({ capturedAtMs: epoch + 5_650 }), 750, epoch + 5_650);
   assert.equal(playbackPosition(first, 750), next.positionMs);
+});
+
+test("small clock drift is corrected gradually without a visible jump", () => {
+  const current = {
+    positionMs: 10_000,
+    durationMs: 180_000,
+    isPlaying: true,
+    playbackRate: 1,
+    syncedAt: 1_000,
+  };
+  const result = reconcilePlaybackAnchor(
+    current,
+    snapshot({ positionMs: 10_500, durationMs: 180_000, capturedAtMs: 2_000, timelineUpdatedAtMs: 2_000 }),
+    2_000,
+    2_000,
+  );
+  assert.equal(result.driftMs, -500);
+  assert.equal(result.correction, "smooth");
+  assert.equal(result.anchor.positionMs, 10_880);
+});
+
+test("large clock drift snaps back to the authoritative player position", () => {
+  const current = {
+    positionMs: 10_000,
+    durationMs: 180_000,
+    isPlaying: true,
+    playbackRate: 1,
+    syncedAt: 1_000,
+  };
+  const result = reconcilePlaybackAnchor(
+    current,
+    snapshot({ positionMs: 15_000, capturedAtMs: 2_000, timelineUpdatedAtMs: 2_000 }),
+    2_000,
+    2_000,
+  );
+  assert.equal(result.driftMs, 4_000);
+  assert.equal(result.correction, "snap");
+  assert.equal(result.anchor.positionMs, 15_000);
 });
 
 test("paused snapshots do not advance despite an old timestamp", () => {

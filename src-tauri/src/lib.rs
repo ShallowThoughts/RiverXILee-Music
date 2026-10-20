@@ -20,6 +20,10 @@ use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Media::MediaPlaybackType;
+use windows::Win32::Foundation::LPARAM;
+use windows::Win32::Graphics::Gdi::{
+    DEFAULT_CHARSET, EnumFontFamiliesExW, GetDC, LOGFONTW, ReleaseDC, TEXTMETRICW,
+};
 
 mod netease;
 
@@ -79,18 +83,22 @@ fn restore_window_placement(window: &WebviewWindow) -> Result<(), String> {
             let size = monitor.size();
             let right = i64::from(position.x) + i64::from(size.width);
             let bottom = i64::from(position.y) + i64::from(size.height);
-            saved_right > i64::from(position.x)
-                && i64::from(placement.x) < right
-                && saved_bottom > i64::from(position.y)
-                && i64::from(placement.y) < bottom
+            let intersection_width =
+                (saved_right.min(right) - i64::from(placement.x).max(i64::from(position.x))).max(0);
+            let intersection_height = (saved_bottom.min(bottom)
+                - i64::from(placement.y).max(i64::from(position.y)))
+            .max(0);
+            intersection_width >= 160 && intersection_height >= 80
         });
+    window
+        .set_size(PhysicalSize::new(width, height))
+        .map_err(error_text)?;
     if is_visible {
-        window
-            .set_size(PhysicalSize::new(width, height))
-            .map_err(error_text)?;
         window
             .set_position(PhysicalPosition::new(placement.x, placement.y))
             .map_err(error_text)?;
+    } else {
+        window.center().map_err(error_text)?;
     }
     Ok(())
 }
@@ -177,6 +185,51 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+unsafe extern "system" fn collect_font_family(
+    logfont: *const LOGFONTW,
+    _metric: *const TEXTMETRICW,
+    _font_type: u32,
+    fonts: LPARAM,
+) -> i32 {
+    if logfont.is_null() || fonts.0 == 0 {
+        return 1;
+    }
+    let face_name = unsafe { &(*logfont).lfFaceName };
+    let length = face_name
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(face_name.len());
+    let name = String::from_utf16_lossy(&face_name[..length]);
+    if !name.is_empty() && !name.starts_with('@') {
+        unsafe { &mut *(fonts.0 as *mut HashSet<String>) }.insert(name);
+    }
+    1
+}
+
+#[tauri::command]
+fn list_system_fonts() -> Result<Vec<String>, String> {
+    let mut fonts: HashSet<String> = HashSet::new();
+    let hdc = unsafe { GetDC(None) };
+    if hdc.0.is_null() {
+        return Err("无法读取 Windows 字体列表".to_string());
+    }
+    let mut query = LOGFONTW::default();
+    query.lfCharSet = DEFAULT_CHARSET;
+    unsafe {
+        EnumFontFamiliesExW(
+            hdc,
+            &query,
+            Some(collect_font_family),
+            LPARAM((&mut fonts as *mut HashSet<String>) as isize),
+            0,
+        );
+        ReleaseDC(None, hdc);
+    }
+    let mut fonts: Vec<_> = fonts.into_iter().collect();
+    fonts.sort_by_key(|font| font.to_lowercase());
+    Ok(fonts)
 }
 
 fn timeline_timestamp_ms(winrt_ticks: i64) -> Option<i64> {
@@ -779,7 +832,7 @@ async fn search_lyrics_candidates(
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.0")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.1")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -899,7 +952,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.0")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.1")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -959,7 +1012,7 @@ async fn fetch_lyrics(
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.0")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.1")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -1040,6 +1093,14 @@ async fn fetch_lyrics(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enumerates_installed_windows_font_families() {
+        let fonts = super::list_system_fonts().expect("Windows fonts should be readable");
+        println!("detected {} installed font families", fonts.len());
+        assert!(fonts.len() > 10);
+        assert!(fonts.iter().all(|font| !font.is_empty() && !font.starts_with('@')));
+    }
+
     #[test]
     fn rejects_wrong_artist_and_different_recording_duration() {
         let song =
@@ -1126,7 +1187,7 @@ mod tests {
     fn reads_the_live_github_release_feed() {
         let update = tauri::async_runtime::block_on(super::check_for_update())
             .expect("GitHub latest release should be readable");
-        assert_eq!(update.current_version, "1.1.0");
+        assert_eq!(update.current_version, "1.1.1");
         assert!(!update.latest_version.is_empty());
         assert!(update.download_url.starts_with("https://github.com/"));
     }
@@ -1336,6 +1397,12 @@ fn start_dragging(window: WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reset_window_placement(window: WebviewWindow) -> Result<(), String> {
+    window.center().map_err(error_text)?;
+    save_window_placement(&window)
+}
+
+#[tauri::command]
 fn set_window_visible(window: WebviewWindow, visible: bool) -> Result<(), String> {
     if visible {
         window.show().map_err(error_text)?;
@@ -1480,6 +1547,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_media_snapshot,
             list_media_sessions,
+            list_system_fonts,
             control_media,
             fetch_lyrics,
             search_lyrics_candidates,
@@ -1491,6 +1559,7 @@ pub fn run() {
             minimize_window,
             close_window,
             start_dragging,
+            reset_window_placement,
             set_window_visible,
             load_preferences,
             save_preferences,

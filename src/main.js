@@ -4,8 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
+import { buildDiagnosticReport, lyricProvider, lyricTimingType } from "./diagnostics.js";
 import { findActiveLine, lineProgress, parseLrc, visibleLineIndices, wordProgress } from "./lyrics.js";
-import { playbackAnchor, playbackPosition } from "./playback.js";
+import { playbackAnchor, playbackPosition, reconcilePlaybackAnchor } from "./playback.js";
 import {
   DEFAULT_SHORTCUTS,
   SHORTCUT_ACTIONS,
@@ -15,7 +16,9 @@ import {
   shortcutFromKeyboardEvent,
 } from "./preferences.js";
 import {
+  applyDisplayPreset,
   DEFAULT_DISPLAY_SETTINGS,
+  DISPLAY_PRESETS,
   hexToRgb,
   rgbToHex,
   sanitizeDisplaySettings,
@@ -23,6 +26,7 @@ import {
 import "./styles.css";
 
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
+const APP_VERSION = "1.1.1";
 const DISPLAY_SETTINGS_KEY = "riverxilee-desktop-lyrics.display.v1";
 const SHORTCUTS_KEY = "riverxilee-desktop-lyrics.shortcuts.v1";
 const PLAYER_KEY = "riverxilee-desktop-lyrics.player.v1";
@@ -77,6 +81,12 @@ const state = {
   lyricRetryAt: 0,
   lyricAttempts: 0,
   lyricMatch: null,
+  lyricFromCache: false,
+  syncDriftMs: 0,
+  syncCorrection: "steady",
+  mediaPollFailures: 0,
+  lastMediaError: "",
+  lastMediaPollAt: 0,
   alwaysOnTop: true,
   fullscreen: false,
   locked: false,
@@ -200,8 +210,8 @@ document.querySelector("#app").innerHTML = `
     <aside class="settings-panel" id="settings-panel" aria-hidden="true" aria-label="歌词显示设置">
       <div class="settings-heading">
         <div>
-          <strong>歌词显示</strong>
-          <span>即时预览 · 自动保存</span>
+          <strong>歌词与同步</strong>
+          <span>即时预览 · 自动保存 · v${APP_VERSION}</span>
         </div>
         <button class="icon-button quiet" id="settings-close-button" type="button" aria-label="关闭设置">
           <i class="ph ph-x" aria-hidden="true"></i>
@@ -211,6 +221,7 @@ document.querySelector("#app").innerHTML = `
       <nav class="settings-tabs" aria-label="设置分类">
         <button class="settings-tab is-active" type="button" data-settings-tab="display">显示</button>
         <button class="settings-tab" type="button" data-settings-tab="sync">同步</button>
+        <button class="settings-tab" type="button" data-settings-tab="status">状态</button>
         <button class="settings-tab" type="button" data-settings-tab="shortcuts">快捷键</button>
       </nav>
 
@@ -243,6 +254,19 @@ document.querySelector("#app").innerHTML = `
             <option value="solid">自定义纯色</option>
           </select>
         </label>
+        <label class="setting-control setting-control-wide">
+          <span>歌词字体 <output id="font-count">正在读取本机字体…</output></span>
+          <select class="font-family-input" id="font-family-select" data-setting="fontFamily" aria-label="选择本机字体">
+            <option value="Segoe UI Variable Display">Segoe UI Variable Display</option>
+          </select>
+        </label>
+        <label class="setting-control setting-control-wide">
+          <span>显示预设</span>
+          <span class="preset-control">
+            <select id="display-preset-select"></select>
+            <button class="text-button" id="apply-preset-button" type="button">应用</button>
+          </span>
+        </label>
        </div>
 
        <div class="color-editor">
@@ -254,6 +278,16 @@ document.querySelector("#app").innerHTML = `
         <label>G <input type="number" min="0" max="255" step="1" data-color-channel="g" /></label>
         <label>B <input type="number" min="0" max="255" step="1" data-color-channel="b" /></label>
        </div>
+      </section>
+
+      <section class="settings-section" data-settings-section="status">
+        <div class="diagnostic-summary" id="diagnostic-summary" aria-live="polite"></div>
+        <div class="diagnostic-actions">
+          <button class="text-button" id="copy-diagnostics-button" type="button">复制诊断信息</button>
+          <button class="text-button" id="refresh-diagnostics-button" type="button">重新检测</button>
+          <button class="text-button" id="reset-window-button" type="button">窗口回到屏幕中央</button>
+        </div>
+        <p class="diagnostic-note">诊断信息不包含账号、聊天内容或本地文件，仅用于判断播放器、歌词和时间轴状态。</p>
       </section>
 
       <section class="settings-section" data-settings-section="sync">
@@ -358,10 +392,43 @@ const elements = {
   cacheStatus: document.querySelector("#cache-status"),
   autostart: document.querySelector("#autostart-switch"),
   candidateBrowser: document.querySelector("#candidate-browser"),
+  diagnosticSummary: document.querySelector("#diagnostic-summary"),
+  displayPreset: document.querySelector("#display-preset-select"),
+  fontFamily: document.querySelector("#font-family-select"),
+  fontCount: document.querySelector("#font-count"),
 };
+
+for (const [value, preset] of Object.entries(DISPLAY_PRESETS)) {
+  elements.displayPreset.append(new Option(preset.label, value));
+}
 
 let availableUpdate = null;
 let updateCheckInFlight = false;
+
+const FALLBACK_FONTS = [
+  "Segoe UI Variable Display",
+  "Microsoft YaHei UI",
+  "Microsoft JhengHei UI",
+  "Arial",
+];
+
+async function loadSystemFonts() {
+  let fonts = FALLBACK_FONTS;
+  try {
+    if (IS_TAURI) fonts = await invoke("list_system_fonts");
+    fonts = [...new Set([...fonts, state.display.fontFamily])]
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+  } catch {
+    elements.fontCount.textContent = "读取失败，显示常用字体";
+  }
+  elements.fontFamily.replaceChildren(...fonts.map((font) => new Option(font, font)));
+  elements.fontFamily.value = state.display.fontFamily;
+  elements.fontFamily.style.fontFamily = `"${state.display.fontFamily.replace(/["'\\]/g, "")}", sans-serif`;
+  if (elements.fontCount.textContent !== "读取失败，显示常用字体") {
+    elements.fontCount.textContent = `已识别 ${fonts.length} 款`;
+  }
+}
 
 function setUpdateBannerVisible(visible) {
   elements.updateBanner.classList.toggle("is-visible", visible);
@@ -404,6 +471,7 @@ function updateSettingValue(path, value) {
 
 function syncSettingsPanel() {
   for (const input of settingInputs) input.value = state.display[input.dataset.setting];
+  elements.fontFamily.style.fontFamily = `"${state.display.fontFamily.replace(/["'\\]/g, "")}", sans-serif`;
   for (const input of colorInputs) input.value = state.display.color[input.dataset.colorChannel];
   elements.colorPicker.value = rgbToHex(state.display.color);
 
@@ -433,6 +501,11 @@ function applyDisplaySettings({ rerender = true } = {}) {
   root.style.setProperty("--lyrics-offset-x", `${display.offsetX}vw`);
   root.style.setProperty("--lyrics-offset-y", `${display.offsetY}vh`);
   root.style.setProperty("--lyrics-stack-height", `${stackHeight}px`);
+  const fontFamily = display.fontFamily.replace(/["'\\]/g, "");
+  root.style.setProperty(
+    "--lyric-font-family",
+    `"${fontFamily}", "Segoe UI Variable Display", "Microsoft YaHei UI", sans-serif`,
+  );
   root.style.setProperty(
     "--karaoke-color",
     `rgb(${display.color.r} ${display.color.g} ${display.color.b})`,
@@ -494,6 +567,48 @@ function syncTrackTools() {
     : "自动选择";
 }
 
+function diagnosticData() {
+  return {
+    version: APP_VERSION,
+    ...state,
+    positionMs: estimatedPosition(),
+    platformName,
+  };
+}
+
+function renderDiagnostics() {
+  if (!elements.diagnosticSummary) return;
+  const source = state.source ? platformName(state.source) : "未连接";
+  const sessions = state.availableSources.length
+    ? state.availableSources.map((item) => `${platformName(item.source)} · ${item.isPlaying ? "播放中" : "已暂停"}`).join(" / ")
+    : "未检测到受支持的播放器";
+  const rows = [
+    ["当前播放器", source],
+    ["检测结果", sessions],
+    ["歌曲", state.title ? `${state.title}${state.artist ? ` · ${state.artist}` : ""}` : "等待歌曲信息"],
+    ["歌词", `${lyricProvider(state.lyricMatch)} · ${lyricTimingType(state.lines)}${state.lyricFromCache ? " · 本地缓存" : ""}`],
+    ["同步", `${state.syncDriftMs > 0 ? "+" : ""}${state.syncDriftMs} ms · ${state.syncCorrection === "snap" ? "已重新锁定" : state.syncCorrection === "smooth" ? "平滑纠偏" : "稳定"}`],
+    ["连接", state.mediaPollFailures ? `连续失败 ${state.mediaPollFailures} 次 · 正在重试` : "读取正常"],
+  ];
+  elements.diagnosticSummary.replaceChildren();
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    row.className = "diagnostic-row";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const detail = document.createElement("strong");
+    detail.textContent = value;
+    row.append(name, detail);
+    elements.diagnosticSummary.append(row);
+  }
+  if (state.lastMediaError || state.lyricStatus === "error") {
+    const error = document.createElement("p");
+    error.className = "diagnostic-error";
+    error.textContent = `最近问题：${state.lastMediaError || state.lyricMessage}`;
+    elements.diagnosticSummary.append(error);
+  }
+}
+
 function saveOffsets() {
   localStorage.setItem(OFFSETS_KEY, JSON.stringify(state.offsets));
   persistNativePreferences();
@@ -546,6 +661,7 @@ async function refreshMediaSources() {
     }
     elements.playerSource.value = state.preferredSource || previous;
     syncTrackTools();
+    renderDiagnostics();
   } catch {
     // Media polling continues even if the optional source list is temporarily unavailable.
   }
@@ -650,6 +766,7 @@ async function loadLyrics(snapshot, trackKey) {
   state.lyricAttempts += 1;
   state.lyricStatus = "loading";
   state.lyricMessage = "";
+  state.lyricFromCache = false;
   state.lines = [];
   state.activeIndex = Number.NaN;
   renderLyricWindow(-1);
@@ -661,6 +778,7 @@ async function loadLyrics(snapshot, trackKey) {
       state.lines = cachedLines;
       state.lyricStatus = "ready";
       state.lyricMatch = cached;
+      state.lyricFromCache = true;
       state.activeIndex = Number.NaN;
       cached.savedAt = Date.now();
       saveLyricsCache();
@@ -682,6 +800,7 @@ async function loadLyrics(snapshot, trackKey) {
     if (!state.lines.length) throw new Error("歌词没有可用的时间标签");
     state.lyricStatus = "ready";
     state.lyricMatch = result;
+    state.lyricFromCache = false;
     state.activeIndex = Number.NaN;
     state.lyricCache[trackKey] = { ...result, savedAt: Date.now() };
     saveLyricsCache();
@@ -691,6 +810,7 @@ async function loadLyrics(snapshot, trackKey) {
     state.lyricRetryAt = performance.now() + 5_000 * state.lyricAttempts;
     state.lyricMessage = String(error).replace(/^.*?: /, "");
     renderLyricWindow(-1);
+    renderDiagnostics();
   }
 }
 
@@ -700,16 +820,34 @@ async function pollMedia() {
   if (!IS_TAURI || mediaPollInFlight) return;
   mediaPollInFlight = true;
   try {
+    const receivedAt = performance.now();
+    const receivedAtEpoch = Date.now();
     const snapshot = await invoke("get_media_snapshot", {
       preferredSource: state.preferredSource || null,
     });
     const wasConnected = state.connected;
+    const sameTrack = wasConnected
+      && state.source === snapshot.source
+      && state.title === snapshot.title
+      && state.artist === snapshot.artist;
     state.connected = snapshot.connected;
     state.source = snapshot.source;
     state.title = snapshot.title;
     state.artist = snapshot.artist;
     state.album = snapshot.album;
-    Object.assign(state, playbackAnchor(snapshot, performance.now(), Date.now()));
+    if (snapshot.connected && sameTrack) {
+      const reconciled = reconcilePlaybackAnchor(state, snapshot, receivedAt, receivedAtEpoch);
+      Object.assign(state, reconciled.anchor);
+      state.syncDriftMs = reconciled.driftMs;
+      state.syncCorrection = reconciled.correction;
+    } else {
+      Object.assign(state, playbackAnchor(snapshot, receivedAt, receivedAtEpoch));
+      state.syncDriftMs = 0;
+      state.syncCorrection = "steady";
+    }
+    state.mediaPollFailures = 0;
+    state.lastMediaError = "";
+    state.lastMediaPollAt = Date.now();
     if (!wasConnected) state.activeIndex = Number.NaN;
     updateConnectionUi();
 
@@ -722,6 +860,7 @@ async function pollMedia() {
       state.activeIndex = Number.NaN;
       state.lyricStatus = "idle";
       state.lyricMatch = null;
+      state.lyricFromCache = false;
       state.fetchToken += 1;
       state.lyricAttempts = 0;
       state.lyricOffsetMs = state.offsets[trackKey] ?? 0;
@@ -732,13 +871,19 @@ async function pollMedia() {
       && state.lyricAttempts < 3 && performance.now() >= state.lyricRetryAt) {
       loadLyrics(snapshot, trackKey);
     }
+    renderDiagnostics();
   } catch (error) {
+    state.mediaPollFailures += 1;
+    state.lastMediaError = String(error).replace(/^.*?: /, "");
     state.positionMs = estimatedPosition();
     state.syncedAt = performance.now();
-    state.isPlaying = false;
-    state.connected = false;
-    updateConnectionUi();
-    setStageMessage("暂时无法读取播放器", "正在自动重连");
+    if (state.mediaPollFailures >= 3) {
+      state.isPlaying = false;
+      state.connected = false;
+      updateConnectionUi();
+      setStageMessage("暂时无法读取播放器", "正在自动重连，不需要重新打开软件");
+    }
+    renderDiagnostics();
   } finally {
     mediaPollInFlight = false;
   }
@@ -824,6 +969,7 @@ for (const tab of document.querySelectorAll("[data-settings-tab]")) {
     for (const section of document.querySelectorAll("[data-settings-section]")) {
       section.classList.toggle("is-active", section.dataset.settingsSection === tab.dataset.settingsTab);
     }
+    if (tab.dataset.settingsTab === "status") renderDiagnostics();
   });
 }
 
@@ -855,6 +1001,42 @@ document.querySelector("#settings-reset-button").addEventListener("click", () =>
   saveDisplaySettings();
   applyDisplaySettings();
   showToast("歌词显示已恢复默认");
+});
+
+document.querySelector("#apply-preset-button").addEventListener("click", () => {
+  const presetName = elements.displayPreset.value;
+  state.display = applyDisplayPreset(state.display, presetName);
+  saveDisplaySettings();
+  applyDisplaySettings();
+  showToast(`已应用${DISPLAY_PRESETS[presetName]?.label ?? "显示"}预设`);
+});
+
+document.querySelector("#copy-diagnostics-button").addEventListener("click", async () => {
+  const report = buildDiagnosticReport(diagnosticData());
+  try {
+    await navigator.clipboard.writeText(report);
+    showToast("诊断信息已复制，可以直接粘贴到反馈中");
+  } catch {
+    showToast("复制失败，请在问题反馈中自动附带诊断信息", 4_000);
+  }
+});
+
+document.querySelector("#refresh-diagnostics-button").addEventListener("click", async () => {
+  state.mediaPollFailures = 0;
+  state.lastMediaError = "";
+  await Promise.all([pollMedia(), refreshMediaSources()]);
+  renderDiagnostics();
+  showToast("播放器与歌词状态已重新检测");
+});
+
+document.querySelector("#reset-window-button").addEventListener("click", async () => {
+  if (!IS_TAURI) return;
+  try {
+    await invoke("reset_window_placement");
+    showToast("窗口已回到当前屏幕中央");
+  } catch {
+    showToast("暂时无法恢复窗口位置");
+  }
 });
 
 elements.playerSource.addEventListener("change", () => {
@@ -897,6 +1079,7 @@ async function chooseLyricsCandidate(candidate, button) {
     state.activeIndex = Number.NaN;
     state.lyricStatus = "ready";
     state.lyricMatch = result;
+    state.lyricFromCache = false;
     state.lyricCache[state.trackKey] = { ...result, savedAt: Date.now(), manuallySelected: true };
     saveLyricsCache();
     elements.candidateBrowser.replaceChildren();
@@ -1055,7 +1238,7 @@ document.querySelector("#feedback-button").addEventListener("click", async () =>
             : source.includes("applemusic") || source.includes("itunes") ? "Apple Music"
               : "不确定";
   const params = new URLSearchParams({
-    version: "v1.1.0",
+    version: `v${APP_VERSION}`,
     platform,
     source: state.source || "unknown",
     duration: String(state.durationMs || 0),
@@ -1063,6 +1246,8 @@ document.querySelector("#feedback-button").addEventListener("click", async () =>
     lyricStatus: state.lyricStatus,
     lyricMatch: state.lyricMatch?.songMid || "none",
     offset: String(state.lyricOffsetMs),
+    syncDrift: String(state.syncDriftMs),
+    diagnostic: buildDiagnosticReport(diagnosticData()),
   });
   if (state.title) params.set("song", `${state.title}${state.artist ? ` - ${state.artist}` : ""}`);
   const url = `https://riverxilee-feedback.riverxilee.chatgpt.site/?${params}`;
@@ -1136,6 +1321,7 @@ if (IS_TAURI) {
   listen("global-shortcut", (event) => handleShortcut(event.payload));
   listen("single-instance-activated", () => {
     state.visible = true;
+    showToast("RiverXILee桌面歌词已经在运行", 3_500);
   });
   registerShortcuts();
   pollMedia();
@@ -1158,6 +1344,7 @@ if (IS_TAURI) {
   updateConnectionUi();
 }
 
+loadSystemFonts();
 applyDisplaySettings({ rerender: false });
 syncShortcutInputs();
 syncTrackTools();

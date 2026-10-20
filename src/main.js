@@ -26,7 +26,7 @@ import {
 import "./styles.css";
 
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
-const APP_VERSION = "1.1.1";
+const APP_VERSION = "1.1.2";
 const DISPLAY_SETTINGS_KEY = "riverxilee-desktop-lyrics.display.v1";
 const SHORTCUTS_KEY = "riverxilee-desktop-lyrics.shortcuts.v1";
 const PLAYER_KEY = "riverxilee-desktop-lyrics.player.v1";
@@ -250,15 +250,23 @@ document.querySelector("#app").innerHTML = `
         <label class="setting-control">
           <span>高亮效果</span>
           <select data-setting="colorEffect">
-            <option value="rgb">RGB 流光</option>
+            <option value="rgb">柔和彩色流光</option>
             <option value="solid">自定义纯色</option>
+          </select>
+        </label>
+        <label class="setting-control">
+          <span>歌词动效</span>
+          <select data-setting="motionEffect">
+            <option value="soft">柔和跟随</option>
+            <option value="flow">流体聚焦</option>
+            <option value="none">关闭动效</option>
           </select>
         </label>
         <label class="setting-control setting-control-wide">
           <span>歌词字体 <output id="font-count">正在读取本机字体…</output></span>
-          <select class="font-family-input" id="font-family-select" data-setting="fontFamily" aria-label="选择本机字体">
-            <option value="Segoe UI Variable Display">Segoe UI Variable Display</option>
-          </select>
+          <input class="font-family-input" id="font-family-select" data-setting="fontFamily"
+            list="system-font-options" autocomplete="off" placeholder="输入名称搜索本机字体" aria-label="搜索并选择本机字体" />
+          <datalist id="system-font-options"></datalist>
         </label>
         <label class="setting-control setting-control-wide">
           <span>显示预设</span>
@@ -355,6 +363,7 @@ document.querySelector("#app").innerHTML = `
       <div class="update-copy">
         <strong id="update-title">发现新版本</strong>
         <span id="update-detail">点击下载最新版</span>
+        <span class="update-progress" id="update-progress" aria-hidden="true"><i></i></span>
       </div>
       <button class="text-button update-download" id="update-download-button" type="button">下载更新</button>
       <button class="icon-button quiet" id="update-dismiss-button" type="button" aria-label="稍后更新" title="稍后">
@@ -382,6 +391,7 @@ const elements = {
   updateBanner: document.querySelector("#update-banner"),
   updateTitle: document.querySelector("#update-title"),
   updateDetail: document.querySelector("#update-detail"),
+  updateProgress: document.querySelector("#update-progress"),
   updateDownload: document.querySelector("#update-download-button"),
   lock: document.querySelector("#lock-button"),
   toast: document.querySelector("#toast"),
@@ -395,6 +405,7 @@ const elements = {
   diagnosticSummary: document.querySelector("#diagnostic-summary"),
   displayPreset: document.querySelector("#display-preset-select"),
   fontFamily: document.querySelector("#font-family-select"),
+  fontOptions: document.querySelector("#system-font-options"),
   fontCount: document.querySelector("#font-count"),
 };
 
@@ -404,6 +415,8 @@ for (const [value, preset] of Object.entries(DISPLAY_PRESETS)) {
 
 let availableUpdate = null;
 let updateCheckInFlight = false;
+let updateDownloadInFlight = false;
+let downloadedInstallerPath = "";
 
 const FALLBACK_FONTS = [
   "Segoe UI Variable Display",
@@ -422,7 +435,7 @@ async function loadSystemFonts() {
   } catch {
     elements.fontCount.textContent = "读取失败，显示常用字体";
   }
-  elements.fontFamily.replaceChildren(...fonts.map((font) => new Option(font, font)));
+  elements.fontOptions.replaceChildren(...fonts.map((font) => new Option(font, font)));
   elements.fontFamily.value = state.display.fontFamily;
   elements.fontFamily.style.fontFamily = `"${state.display.fontFamily.replace(/["'\\]/g, "")}", sans-serif`;
   if (elements.fontCount.textContent !== "读取失败，显示常用字体") {
@@ -442,8 +455,14 @@ async function checkForUpdates({ manual = false } = {}) {
     const update = await invoke("check_for_update");
     if (update.available) {
       availableUpdate = update;
+      downloadedInstallerPath = "";
       elements.updateTitle.textContent = `发现 v${update.latestVersion}`;
-      elements.updateDetail.textContent = `当前 v${update.currentVersion} · 已有新版本`;
+      const size = update.downloadSize > 0 ? ` · ${(update.downloadSize / 1024 / 1024).toFixed(1)} MB` : "";
+      elements.updateDetail.textContent = `当前 v${update.currentVersion}${size} · 应用内安全下载`;
+      elements.updateDownload.textContent = "下载并校验";
+      elements.updateDownload.disabled = false;
+      elements.updateProgress.style.setProperty("--update-progress", "0");
+      elements.updateProgress.setAttribute("aria-hidden", "true");
       setUpdateBannerVisible(true);
     } else if (manual) {
       showToast(`当前已是最新版 v${update.currentVersion}`);
@@ -510,6 +529,7 @@ function applyDisplaySettings({ rerender = true } = {}) {
     "--karaoke-color",
     `rgb(${display.color.r} ${display.color.g} ${display.color.b})`,
   );
+  elements.stack.dataset.motion = display.motionEffect;
   syncSettingsPanel();
   if (rerender && state.lyricStatus === "ready") renderLyricWindow(state.activeIndex);
 }
@@ -880,6 +900,16 @@ async function pollMedia() {
     if (state.mediaPollFailures >= 3) {
       state.isPlaying = false;
       state.connected = false;
+      state.source = "";
+      state.title = "";
+      state.artist = "";
+      state.album = "";
+      state.trackKey = "";
+      state.lines = [];
+      state.activeIndex = Number.NaN;
+      state.lyricStatus = "idle";
+      state.lyricMatch = null;
+      state.fetchToken += 1;
       updateConnectionUi();
       setStageMessage("暂时无法读取播放器", "正在自动重连，不需要重新打开软件");
     }
@@ -1260,9 +1290,41 @@ document.querySelector("#update-check-button").addEventListener("click", () => {
 });
 
 elements.updateDownload.addEventListener("click", async () => {
-  if (!availableUpdate?.downloadUrl) return;
-  if (IS_TAURI) await openUrl(availableUpdate.downloadUrl);
-  else window.open(availableUpdate.downloadUrl, "_blank", "noopener,noreferrer");
+  if (!IS_TAURI || !availableUpdate || updateDownloadInFlight) return;
+  if (downloadedInstallerPath) {
+    elements.updateDownload.disabled = true;
+    elements.updateDownload.textContent = "正在启动…";
+    elements.updateDetail.textContent = "即将关闭应用并打开 RiverXILee 更新安装界面";
+    try {
+      await invoke("launch_update", { installerPath: downloadedInstallerPath });
+    } catch (error) {
+      elements.updateDownload.disabled = false;
+      elements.updateDownload.textContent = "重新安装";
+      elements.updateDetail.textContent = String(error).replace(/^.*?: /, "");
+    }
+    return;
+  }
+
+  updateDownloadInFlight = true;
+  elements.updateDownload.disabled = true;
+  elements.updateDownload.textContent = "下载中 0%";
+  elements.updateDetail.textContent = "正在下载更新包，请保持网络连接";
+  elements.updateProgress.setAttribute("aria-hidden", "false");
+  try {
+    downloadedInstallerPath = await invoke("download_update", {
+      expectedVersion: availableUpdate.latestVersion,
+    });
+    elements.updateTitle.textContent = `v${availableUpdate.latestVersion} 已准备好`;
+    elements.updateDetail.textContent = "SHA-256 校验通过 · 点击后覆盖安装并保留配置";
+    elements.updateDownload.textContent = "立即安装";
+  } catch (error) {
+    elements.updateDetail.textContent = String(error).replace(/^.*?: /, "");
+    elements.updateDownload.textContent = "重新下载";
+    elements.updateProgress.style.setProperty("--update-progress", "0");
+  } finally {
+    updateDownloadInFlight = false;
+    elements.updateDownload.disabled = false;
+  }
 });
 
 document.querySelector("#update-dismiss-button").addEventListener("click", () => {
@@ -1319,6 +1381,22 @@ document.querySelector("#close-button").addEventListener("click", () => {
 
 if (IS_TAURI) {
   listen("global-shortcut", (event) => handleShortcut(event.payload));
+  listen("update-download-progress", (event) => {
+    const progress = event.payload;
+    const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+    elements.updateProgress.style.setProperty("--update-progress", String(percent / 100));
+    if (progress.status === "verified") {
+      elements.updateDownload.textContent = "正在校验…";
+      elements.updateDetail.textContent = "下载完成，正在验证安装包完整性";
+    } else {
+      elements.updateDownload.textContent = `下载中 ${percent}%`;
+      const downloaded = (Number(progress.downloadedBytes) / 1024 / 1024).toFixed(1);
+      const total = Number(progress.totalBytes) > 0
+        ? (Number(progress.totalBytes) / 1024 / 1024).toFixed(1)
+        : "--";
+      elements.updateDetail.textContent = `${downloaded} / ${total} MB · 下载完成后自动校验`;
+    }
+  });
   listen("single-instance-activated", () => {
     state.visible = true;
     showToast("RiverXILee桌面歌词已经在运行", 3_500);

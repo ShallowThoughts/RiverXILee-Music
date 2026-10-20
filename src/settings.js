@@ -6,6 +6,7 @@ export const DEFAULT_DISPLAY_SETTINGS = Object.freeze({
   offsetY: 0,
   fontFamily: "Segoe UI Variable Display",
   colorEffect: "rgb",
+  motionEffect: "soft",
   color: Object.freeze({ r: 130, g: 244, b: 212 }),
 });
 
@@ -53,6 +54,9 @@ export function sanitizeDisplaySettings(value = {}) {
     offsetY: clampInteger(value.offsetY, -35, 35, DEFAULT_DISPLAY_SETTINGS.offsetY),
     fontFamily: sanitizeFontFamily(value.fontFamily),
     colorEffect: value.colorEffect === "solid" ? "solid" : "rgb",
+    motionEffect: ["soft", "flow", "none"].includes(value.motionEffect)
+      ? value.motionEffect
+      : DEFAULT_DISPLAY_SETTINGS.motionEffect,
     color: {
       r: clampInteger(color.r, 0, 255, DEFAULT_DISPLAY_SETTINGS.color.r),
       g: clampInteger(color.g, 0, 255, DEFAULT_DISPLAY_SETTINGS.color.g),

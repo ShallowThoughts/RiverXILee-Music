@@ -1,0 +1,19 @@
+[package]
+name = "riverxilee-installer-center"
+version = "1.1.2"
+description = "RiverXILee Desktop Lyrics branded installer"
+authors = ["RiverXILee"]
+edition = "2024"
+
+[lib]
+name = "riverxilee_installer_center_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-dialog = { version = "=2.6.0", default-features = false }
+winreg = "0.55"

@@ -133,6 +133,7 @@ test("sanitizes persisted display settings", () => {
       offsetY: 35,
       fontFamily: "Segoe UI Variable Display",
       colorEffect: "rgb",
+      motionEffect: "soft",
       color: { r: 0, g: 128, b: 255 },
     },
   );

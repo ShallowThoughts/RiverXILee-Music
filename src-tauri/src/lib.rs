@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 use std::str::FromStr;
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -167,6 +170,18 @@ struct UpdateInfo {
     current_version: String,
     latest_version: String,
     download_url: String,
+    download_size: u64,
+    release_notes: String,
+    sha256: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDownloadProgress {
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    percent: u8,
+    status: String,
 }
 
 #[derive(Serialize)]
@@ -279,6 +294,23 @@ fn session_is_playing(session: &GlobalSystemMediaTransportControlsSession) -> bo
         .unwrap_or(false)
 }
 
+fn session_activity_rank(
+    session: &GlobalSystemMediaTransportControlsSession,
+    current_source: &str,
+) -> (i64, bool) {
+    let updated_at = session
+        .GetTimelineProperties()
+        .ok()
+        .and_then(|timeline| timeline.LastUpdatedTime().ok())
+        .and_then(|value| timeline_timestamp_ms(value.UniversalTime))
+        .unwrap_or_default();
+    let is_current = session
+        .SourceAppUserModelId()
+        .map(|value| value.to_string().eq_ignore_ascii_case(current_source))
+        .unwrap_or(false);
+    (updated_at, is_current)
+}
+
 fn source_is_supported_music_app(source: &str) -> bool {
     const MUSIC_APP_MARKERS: [&str; 21] = [
         "qqmusic",
@@ -354,19 +386,27 @@ async fn active_media_session(
         return Ok(None);
     }
 
-    if current
-        .as_ref()
-        .is_some_and(|session| session_is_music_candidate(session) && session_is_playing(session))
-    {
-        return Ok(current);
-    }
-
     let sessions = manager.GetSessions().map_err(error_text)?;
+    let current_source = current
+        .as_ref()
+        .and_then(|session| session.SourceAppUserModelId().ok())
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let mut best_playing: Option<(GlobalSystemMediaTransportControlsSession, (i64, bool))> = None;
     for index in 0..sessions.Size().map_err(error_text)? {
         let session = sessions.GetAt(index).map_err(error_text)?;
         if session_is_music_candidate(&session) && session_is_playing(&session) {
-            return Ok(Some(session));
+            let rank = session_activity_rank(&session, &current_source);
+            if best_playing
+                .as_ref()
+                .is_none_or(|(_, best_rank)| rank > *best_rank)
+            {
+                best_playing = Some((session, rank));
+            }
         }
+    }
+    if let Some((session, _)) = best_playing {
+        return Ok(Some(session));
     }
 
     if current.as_ref().is_some_and(session_is_music_candidate) {
@@ -832,7 +872,7 @@ async fn search_lyrics_candidates(
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.1")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.2")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -952,7 +992,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.1")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.2")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -975,7 +1015,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
     if latest_version.is_empty() {
         return Err("GitHub 最新版本信息不完整".to_string());
     }
-    let download_url = release["assets"]
+    let asset = release["assets"]
         .as_array()
         .and_then(|assets| {
             assets.iter().find(|asset| {
@@ -984,17 +1024,130 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
                     .is_some_and(|name| name.ends_with("_x64-setup.exe"))
             })
         })
-        .and_then(|asset| asset["browser_download_url"].as_str())
-        .or_else(|| release["html_url"].as_str())
-        .unwrap_or("https://github.com/ShallowThoughts/RiverXILee-Music/releases/latest")
+        .ok_or_else(|| "最新版本没有 Windows x64 安装包".to_string())?;
+    let download_url = asset["browser_download_url"]
+        .as_str()
+        .ok_or_else(|| "安装包下载地址不完整".to_string())?
         .to_string();
+    let digest = asset["digest"]
+        .as_str()
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .filter(|value| {
+            value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| "安装包缺少 SHA-256 校验信息".to_string())?
+        .to_ascii_lowercase();
 
     Ok(UpdateInfo {
         available: is_newer_version(&latest_version, &current_version),
         current_version,
         latest_version,
         download_url,
+        download_size: asset["size"].as_u64().unwrap_or_default(),
+        release_notes: release["body"].as_str().unwrap_or_default().to_string(),
+        sha256: digest,
     })
+}
+
+#[tauri::command]
+async fn download_update(app: AppHandle, expected_version: String) -> Result<String, String> {
+    let update = check_for_update().await?;
+    if !update.available || update.latest_version != expected_version {
+        return Err("版本信息已经变化，请重新检查更新".to_string());
+    }
+
+    let response = HTTP_CLIENT
+        .get_or_init(reqwest::Client::new)
+        .get(&update.download_url)
+        .send()
+        .await
+        .map_err(error_text)?
+        .error_for_status()
+        .map_err(error_text)?;
+    let total_bytes = response.content_length().unwrap_or(update.download_size);
+    let file_name = format!(
+        "RiverXILee-Desktop-Lyrics_{}_x64-setup.exe",
+        update.latest_version
+    );
+    let installer_path = std::env::temp_dir().join(file_name);
+    let mut installer = fs::File::create(&installer_path).map_err(error_text)?;
+    let mut stream = response.bytes_stream();
+    let mut hasher = Sha256::new();
+    let mut downloaded_bytes = 0_u64;
+
+    use futures_lite::StreamExt;
+    let download_result = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(error_text)?;
+            installer.write_all(&chunk).map_err(error_text)?;
+            hasher.update(&chunk);
+            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+            let percent = if total_bytes > 0 {
+                ((downloaded_bytes.saturating_mul(100) / total_bytes).min(100)) as u8
+            } else {
+                0
+            };
+            let _ = app.emit(
+                "update-download-progress",
+                UpdateDownloadProgress {
+                    downloaded_bytes,
+                    total_bytes,
+                    percent,
+                    status: "downloading".to_string(),
+                },
+            );
+        }
+        installer.flush().map_err(error_text)
+    }
+    .await;
+    if let Err(error) = download_result {
+        drop(installer);
+        let _ = fs::remove_file(&installer_path);
+        return Err(error);
+    }
+    drop(installer);
+
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if actual_sha256 != update.sha256 {
+        let _ = fs::remove_file(&installer_path);
+        return Err("更新包校验失败，文件已安全删除".to_string());
+    }
+    let _ = app.emit(
+        "update-download-progress",
+        UpdateDownloadProgress {
+            downloaded_bytes,
+            total_bytes,
+            percent: 100,
+            status: "verified".to_string(),
+        },
+    );
+    Ok(installer_path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn launch_update(app: AppHandle, installer_path: String) -> Result<(), String> {
+    let installer_path = fs::canonicalize(&installer_path).map_err(error_text)?;
+    let temp_directory = fs::canonicalize(std::env::temp_dir()).map_err(error_text)?;
+    let file_name = installer_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !installer_path.starts_with(&temp_directory)
+        || !file_name.starts_with("RiverXILee-Desktop-Lyrics_")
+        || !file_name.ends_with("_x64-setup.exe")
+    {
+        return Err("更新安装包路径无效".to_string());
+    }
+
+    Command::new(&installer_path)
+        .arg("/R")
+        .spawn()
+        .map_err(error_text)?;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(450));
+        app.exit(0);
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -1012,7 +1165,7 @@ async fn fetch_lyrics(
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.1")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.2")
             .build()
             .expect("HTTP client should initialize")
     });
@@ -1187,9 +1340,10 @@ mod tests {
     fn reads_the_live_github_release_feed() {
         let update = tauri::async_runtime::block_on(super::check_for_update())
             .expect("GitHub latest release should be readable");
-        assert_eq!(update.current_version, "1.1.1");
+        assert_eq!(update.current_version, "1.1.2");
         assert!(!update.latest_version.is_empty());
         assert!(update.download_url.starts_with("https://github.com/"));
+        assert_eq!(update.sha256.len(), 64);
     }
 
     #[test]
@@ -1553,6 +1707,8 @@ pub fn run() {
             search_lyrics_candidates,
             fetch_lyrics_candidate,
             check_for_update,
+            download_update,
+            launch_update,
             set_always_on_top,
             set_fullscreen,
             set_click_through,

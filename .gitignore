@@ -3,6 +3,8 @@
 /src-tauri/target
 /src-tauri/target-*
 /src-tauri/gen
+**/target/
+**/gen/
 /.vite
 /release/*
 !/release/RiverXILee桌面歌词_1.0_x64-setup.exe

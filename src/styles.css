@@ -476,8 +476,12 @@ button {
   -webkit-text-stroke: 0.2px rgba(4, 8, 10, 0.54);
   white-space: normal;
   text-wrap: balance;
-  transition: opacity 320ms ease, transform 520ms cubic-bezier(0.16, 1, 0.3, 1);
-  animation: lyric-row-in 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  transition: opacity 280ms ease, transform 440ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.lyrics-stack[data-motion="soft"] .lyric-line,
+.lyrics-stack[data-motion="flow"] .lyric-line {
+  animation: lyric-row-in 440ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .current-line {
@@ -494,7 +498,14 @@ button {
   text-shadow: none;
   -webkit-text-stroke: 0;
   transform: translateZ(0);
-  animation: lyric-focus-in 680ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.lyrics-stack[data-motion="soft"] .current-line {
+  animation: lyric-focus-in 560ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.lyrics-stack[data-motion="flow"] .current-line {
+  animation: lyric-liquid-focus 660ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .current-text {
@@ -540,17 +551,17 @@ button {
 
 .current-text[data-effect="rgb"] .current-text-highlight {
   background-image: linear-gradient(
-    90deg,
-    #ff5f73,
-    #ffca58,
-    #66f29a,
-    #60d9ff,
-    #9e7bff,
-    #ff73d1,
-    #ff5f73
+    96deg,
+    #ff82b7 0%,
+    #c79aff 22%,
+    #72dfff 48%,
+    #83efcf 72%,
+    #ffd0e2 100%
   );
-  background-size: 180% 100%;
-  animation: karaoke-rgb-flow 3.8s linear infinite;
+  background-size: 220% 100%;
+  background-position: var(--karaoke-progress) 50%;
+  filter: drop-shadow(0 1px 1px rgba(3, 9, 12, 0.5));
+  transition: clip-path 70ms linear, background-position 120ms linear;
 }
 
 .current-text.has-word-timing {
@@ -590,23 +601,17 @@ button {
 
 .current-text[data-effect="rgb"] .karaoke-word-highlight {
   background-image: linear-gradient(
-    90deg,
-    #ff5f73,
-    #ffca58,
-    #66f29a,
-    #60d9ff,
-    #9e7bff,
-    #ff73d1,
-    #ff5f73
+    96deg,
+    #ff82b7 0%,
+    #c79aff 22%,
+    #72dfff 48%,
+    #83efcf 72%,
+    #ffd0e2 100%
   );
-  background-size: 500% 100%;
-  animation: karaoke-rgb-flow 3.8s linear infinite;
-}
-
-@keyframes karaoke-rgb-flow {
-  to {
-    background-position: 180% 0;
-  }
+  background-size: 220% 100%;
+  background-position: var(--word-progress) 50%;
+  filter: drop-shadow(0 1px 1px rgba(3, 9, 12, 0.5));
+  transition: clip-path 60ms linear, background-position 110ms linear;
 }
 
 .next-line {
@@ -632,12 +637,36 @@ button {
 @keyframes lyric-focus-in {
   from {
     opacity: 0;
-    transform: translateY(28px) scale(0.965);
+    transform: translateY(18px) scale(0.98);
   }
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
   }
+}
+
+@keyframes lyric-liquid-focus {
+  from {
+    opacity: 0.18;
+    transform: translateY(22px) scale(0.97);
+    filter: blur(7px) saturate(0.7);
+    clip-path: inset(18% 8% 18% 8% round 18px);
+  }
+  58% {
+    opacity: 1;
+    filter: blur(0.8px) saturate(1.12);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0) saturate(1);
+    clip-path: inset(0 0 0 0 round 0);
+  }
+}
+
+.lyrics-stack[data-motion="none"] .lyric-line,
+.lyrics-stack[data-motion="none"] .current-line {
+  animation: none;
 }
 
 @keyframes lyric-row-in {
@@ -908,9 +937,41 @@ button {
   white-space: nowrap;
 }
 
+.update-copy .update-progress {
+  display: block;
+  width: 100%;
+  height: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  opacity: 1;
+}
+
+.update-progress[aria-hidden="true"] {
+  display: none;
+}
+
+.update-progress i {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #ff5ca8, #6cdeff 52%, #80f6ca);
+  box-shadow: 0 0 10px rgba(108, 222, 255, 0.48);
+  transform: scaleX(var(--update-progress, 0));
+  transform-origin: left center;
+  transition: transform 180ms ease-out;
+}
+
 .update-download {
   color: rgba(255, 255, 255, 0.9);
   background: rgba(255, 255, 255, 0.1);
+}
+
+.update-download:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .settings-panel {
@@ -1060,6 +1121,10 @@ button {
 .font-family-input {
   width: 100%;
   padding-inline: 9px;
+}
+
+.font-family-input::placeholder {
+  color: rgba(255, 255, 255, 0.34);
 }
 
 .preset-control {
@@ -1395,6 +1460,14 @@ body.is-fullscreen .lyrics-stack {
 
   .lyrics-stage {
     animation: none;
+  }
+
+  .lyric-line,
+  .current-line,
+  .current-text-highlight,
+  .karaoke-word-highlight {
+    animation: none !important;
+    transition: none !important;
   }
 
   *,

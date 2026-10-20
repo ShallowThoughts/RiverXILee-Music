@@ -1,14 +1,15 @@
 {
   "name": "riverxilee-desktop-lyrics",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.1.2",
   "author": "RiverXILee",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "test": "node --test",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   },
   "dependencies": {
     "@phosphor-icons/web": "^2.1.2",

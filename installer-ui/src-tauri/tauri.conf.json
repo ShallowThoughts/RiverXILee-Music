@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RiverXILee安装中心",
+  "version": "1.1.2",
+  "identifier": "top.lxixi.riverxilee-installer-center",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "RiverXILee安装中心",
+        "width": 820,
+        "height": 520,
+        "minWidth": 820,
+        "minHeight": 520,
+        "maxWidth": 820,
+        "maxHeight": 520,
+        "center": true,
+        "transparent": true,
+        "decorations": false,
+        "shadow": true,
+        "resizable": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "publisher": "RiverXILee",
+    "icon": ["../../src-tauri/icons/icon.ico"]
+  }
+}

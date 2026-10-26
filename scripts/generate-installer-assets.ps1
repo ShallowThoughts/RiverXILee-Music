@@ -70,7 +70,7 @@ function New-RiverXILeeBitmap {
         $graphics.DrawString("TRANSPARENT / SYNC", $smallFont, $muted, 17, 87)
         $graphics.DrawString("IMMERSIVE", $smallFont, $muted, 17, 101)
         $graphics.DrawString("Preparing your music space", $smallFont, $muted, 17, 244)
-        $graphics.DrawString("v1.1.2", $smallFont, $white, 17, 267)
+        $graphics.DrawString("v1.1.3", $smallFont, $white, 17, 267)
         $brandFont.Dispose(); $titleFont.Dispose(); $smallFont.Dispose()
     } else {
         $brandFont = [System.Drawing.Font]::new("Segoe UI", 11, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)

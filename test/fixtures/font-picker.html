@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>本机字体选择验证</title>
+  <style>
+    body { padding: 24px; color: #f0f5f4; background: #11191b !important; }
+    .font-check { max-width: 430px; margin-left: auto; }
+    .font-check h1 { font-size: 18px; margin: 0 0 20px; }
+    #check-selection { margin-top: 18px; overflow-wrap: anywhere; font-size: 12px; color: #b4c8c2; }
+    .font-check-samples { display: grid; gap: 18px; margin-top: 32px; text-align: center; }
+    .font-check-samples p { margin: 0; font-family: var(--lyric-font-family) !important; font-size: 24px; }
+  </style>
+</head>
+<body>
+  <section class="font-check">
+    <h1>本机字体选择验证</h1>
+    <div class="setting-control">
+      <span>歌词字体 <output id="font-count">正在读取验证列表…</output></span>
+      <button class="font-picker-button" id="font-button" type="button" aria-label="选择歌词字体" aria-haspopup="listbox" aria-expanded="false" aria-controls="font-option-list"><span id="font-label"></span><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="m2 4 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></button>
+    </div>
+    <p id="check-selection" role="status"></p>
+    <div class="font-check-samples"><p>上一句，清晰可见</p><p>让音乐留在画面中央</p><p>下一句，也跟随你的字体</p></div>
+  </section>
+  <div class="font-picker-popup" id="font-popup" popover="manual" hidden>
+    <input class="font-search-input" id="font-search" type="search" autocomplete="off" placeholder="搜索中文名或英文名" role="combobox" aria-label="搜索本机字体" aria-controls="font-option-list" aria-expanded="false" />
+    <div class="font-option-list" id="font-option-list" role="listbox" aria-label="本机已安装字体"></div>
+    <p class="font-picker-status" id="font-status" role="status"></p>
+  </div>
+  <script type="module">
+    import '/src/styles.css';
+    import { createFontPicker } from '/src/font-picker.js';
+    import { lyricFontFamily } from '/src/settings.js';
+    let selected = 'Segoe UI Variable Display';
+    function apply() {
+      document.documentElement.style.setProperty('--lyric-font-family', lyricFontFamily(selected));
+      document.querySelector('#check-selection').textContent = `实际应用：${selected}`;
+    }
+    const picker = createFontPicker({
+      button: document.querySelector('#font-button'), popup: document.querySelector('#font-popup'),
+      search: document.querySelector('#font-search'), list: document.querySelector('#font-option-list'),
+      status: document.querySelector('#font-status'), label: document.querySelector('#font-label'),
+      getSelected: () => selected, onSelect: (font) => { selected = font; apply(); },
+    });
+    const fonts = await fetch('/artifacts/v1.1.3/windows-font-catalog.json').then((response) => response.json());
+    const catalog = picker.setFonts(fonts);
+    document.querySelector('#font-count').textContent = `本机实际读取 ${catalog.length} 款`;
+    apply();
+  </script>
+</body>
+</html>

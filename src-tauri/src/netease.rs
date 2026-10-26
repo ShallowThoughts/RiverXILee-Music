@@ -3,7 +3,9 @@ use serde_json::Value;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, HWND, LPARAM};
+use windows::core::BOOL;
+use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible};
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -193,14 +195,63 @@ fn current_database_track() -> Option<TrackMetadata> {
     latest_history_track(&connection)
 }
 
-pub fn current_track_id(title: &str, artist: &str) -> Option<String> {
-    fn normalized(value: &str) -> String {
-        value
-            .chars()
-            .filter(|character| character.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect()
+fn parse_window_track(value: &str) -> Option<TrackMetadata> {
+    let value = value.trim();
+    let value = value.strip_suffix(" - 网易云音乐")
+        .or_else(|| value.strip_suffix(" - NetEase Cloud Music")).unwrap_or(value);
+    let (title, artist) = value.rsplit_once(" - ")?;
+    if title.trim().is_empty() || artist.trim().is_empty() || artist == "网易云音乐"
+        || value.contains("桌面歌词") { return None; }
+    Some(TrackMetadata {
+        track_id: String::new(), title: title.trim().to_string(), artist: artist.trim().to_string(),
+        album: String::new(), duration_ms: 0,
+    })
+}
+
+fn normalized(value: &str) -> String {
+    value.chars().filter(|character| character.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn resolve_track_metadata(window: Option<TrackMetadata>, cached: Option<TrackMetadata>) -> Option<TrackMetadata> {
+    match (window, cached) {
+        (Some(current), Some(cached)) if normalized(&current.title) == normalized(&cached.title)
+            && normalized(&current.artist) == normalized(&cached.artist) => Some(cached),
+        (Some(current), _) => Some(current),
+        (None, cached) => cached,
     }
+}
+
+struct WindowTrackSearch {
+    process_ids: Vec<u32>,
+    track: Option<TrackMetadata>,
+    visible: bool,
+}
+
+unsafe extern "system" fn inspect_netease_window(window: HWND, data: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(data.0 as *mut WindowTrackSearch) };
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut process_id)); }
+    if !search.process_ids.contains(&process_id) { return BOOL(1); }
+    let mut title = [0u16; 1024];
+    let length = unsafe { GetWindowTextW(window, &mut title) } as usize;
+    if let Some(track) = parse_window_track(&String::from_utf16_lossy(&title[..length])) {
+        let visible = unsafe { IsWindowVisible(window) }.as_bool();
+        if search.track.is_none() || (visible && !search.visible) {
+            search.track = Some(track);
+            search.visible = visible;
+        }
+    }
+    BOOL(1)
+}
+
+fn current_window_track() -> Option<TrackMetadata> {
+    let mut search = WindowTrackSearch { process_ids: netease_process_ids(), track: None, visible: false };
+    if search.process_ids.is_empty() { return None; }
+    let _ = unsafe { EnumWindows(Some(inspect_netease_window), LPARAM((&mut search as *mut WindowTrackSearch) as isize)) };
+    search.track
+}
+
+pub fn current_track_id(title: &str, artist: &str) -> Option<String> {
     let track = current_database_track()?;
     let wanted_artist = normalized(artist);
     let found_artist = normalized(&track.artist);
@@ -327,8 +378,8 @@ pub fn current_position_ms() -> Option<i64> {
 }
 
 pub fn current_track() -> Option<TrackSnapshot> {
-    let metadata = current_database_track()?;
     let position_ms = current_position_ms()?;
+    let metadata = resolve_track_metadata(current_window_track(), current_database_track())?;
     let mut previous = LAST_TRACK.get_or_init(|| Mutex::new(None)).lock().ok()?;
     let is_playing = playback_is_advancing(
         previous.as_ref(),
@@ -358,7 +409,7 @@ mod tests {
 
     use super::{
         PlaybackSample, clock_address, clock_instruction_offset, latest_history_track,
-        parse_history_track, playback_is_advancing,
+        parse_history_track, playback_is_advancing, parse_window_track, resolve_track_metadata,
     };
 
     #[test]
@@ -441,5 +492,27 @@ mod tests {
         ));
         assert!(playback_is_advancing(Some(&previous), "下一首", "歌手", 0));
         assert!(!playback_is_advancing(None, "知我", "国风堂/哦漏", 12_500));
+    }
+
+    #[test]
+    fn uncached_song_uses_live_window_metadata_instead_of_old_history() {
+        let cached = parse_history_track("track", r#"{"id":1,"name":"上一首","artists":[{"name":"歌手"}]}"#);
+        let current = resolve_track_metadata(parse_window_track("新歌 - 新歌手 - 网易云音乐"), cached).unwrap();
+        assert_eq!(current.title, "新歌");
+        assert_eq!(current.artist, "新歌手");
+        assert!(current.track_id.is_empty());
+        assert_eq!(current.duration_ms, 0);
+    }
+
+    #[test]
+    fn live_song_is_available_before_any_history_exists() {
+        let current = resolve_track_metadata(parse_window_track("New Song - Artist"), None).unwrap();
+        assert_eq!(current.title, "New Song");
+        assert!(parse_window_track("网易云音乐").is_none());
+        assert!(parse_window_track("首页 - 网易云音乐").is_none());
+        let cached = parse_history_track("track", r#"{"id":42,"name":"New Song","duration":180000,"artists":[{"name":"Artist"}]}"#);
+        let enriched = resolve_track_metadata(parse_window_track("New Song - Artist"), cached).unwrap();
+        assert_eq!(enriched.track_id, "42");
+        assert_eq!(enriched.duration_ms, 180_000);
     }
 }

@@ -10,14 +10,14 @@ use tauri_plugin_dialog::DialogExt;
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
-const TARGET_VERSION: &str = "1.1.2";
+const TARGET_VERSION: &str = "1.1.3";
 const PRODUCT_NAME: &str = "RiverXILee桌面歌词";
 const MAIN_BINARY_NAME: &str = "riverxilee-desktop-lyrics.exe";
 const UNINSTALL_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RiverXILee桌面歌词";
 const INSTALL_LOCATION_ENV: &str = "RIVERXILEE_INSTALL_LOCATION";
 const INSTALLER_BYTES: &[u8] = include_bytes!(
-    "../../../src-tauri/target/release/bundle/nsis/RiverXILee桌面歌词_1.1.2_x64-setup.exe"
+    "../../../src-tauri/target/release/bundle/nsis/RiverXILee桌面歌词_1.1.3_x64-setup.exe"
 );
 
 #[derive(Serialize)]

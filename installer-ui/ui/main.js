@@ -8,7 +8,7 @@ const isPreview = ["127.0.0.1", "localhost"].includes(window.location.hostname);
 const previewContext = {
   installedVersion: "1.1.1",
   installLocation: "C:\\Users\\RiverXILee\\AppData\\Local\\RiverXILee桌面歌词",
-  targetVersion: "1.1.2",
+  targetVersion: "1.1.3",
 };
 const invoke = isTauri
   ? (command, args) => tauriCore.invoke(command, args)

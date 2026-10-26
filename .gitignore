@@ -6,6 +6,7 @@
 **/target/
 **/gen/
 /.vite
+/artifacts/
 /release/*
 !/release/RiverXILee桌面歌词_1.0_x64-setup.exe
 !/release/RiverXILee桌面歌词_1.0.exe

@@ -18,20 +18,18 @@ use tauri::{
     tray::TrayIconBuilder,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_dialog::DialogExt;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
 };
 use windows::Media::MediaPlaybackType;
-use windows::Win32::Foundation::LPARAM;
-use windows::Win32::Graphics::Gdi::{
-    DEFAULT_CHARSET, EnumFontFamiliesExW, GetDC, LOGFONTW, ReleaseDC, TEXTMETRICW,
-};
-
+mod fonts;
 mod netease;
 
 static MEDIA_MANAGER: OnceLock<GlobalSystemMediaTransportControlsSessionManager> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static LYRICS_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static SHORTCUT_ACTIONS: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
 
 #[derive(Deserialize, Serialize)]
@@ -202,49 +200,9 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-unsafe extern "system" fn collect_font_family(
-    logfont: *const LOGFONTW,
-    _metric: *const TEXTMETRICW,
-    _font_type: u32,
-    fonts: LPARAM,
-) -> i32 {
-    if logfont.is_null() || fonts.0 == 0 {
-        return 1;
-    }
-    let face_name = unsafe { &(*logfont).lfFaceName };
-    let length = face_name
-        .iter()
-        .position(|character| *character == 0)
-        .unwrap_or(face_name.len());
-    let name = String::from_utf16_lossy(&face_name[..length]);
-    if !name.is_empty() && !name.starts_with('@') {
-        unsafe { &mut *(fonts.0 as *mut HashSet<String>) }.insert(name);
-    }
-    1
-}
-
 #[tauri::command]
-fn list_system_fonts() -> Result<Vec<String>, String> {
-    let mut fonts: HashSet<String> = HashSet::new();
-    let hdc = unsafe { GetDC(None) };
-    if hdc.0.is_null() {
-        return Err("无法读取 Windows 字体列表".to_string());
-    }
-    let mut query = LOGFONTW::default();
-    query.lfCharSet = DEFAULT_CHARSET;
-    unsafe {
-        EnumFontFamiliesExW(
-            hdc,
-            &query,
-            Some(collect_font_family),
-            LPARAM((&mut fonts as *mut HashSet<String>) as isize),
-            0,
-        );
-        ReleaseDC(None, hdc);
-    }
-    let mut fonts: Vec<_> = fonts.into_iter().collect();
-    fonts.sort_by_key(|font| font.to_lowercase());
-    Ok(fonts)
+fn list_system_fonts() -> Result<Vec<fonts::SystemFont>, String> {
+    fonts::system_fonts()
 }
 
 fn timeline_timestamp_ms(winrt_ticks: i64) -> Option<i64> {
@@ -454,7 +412,19 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
     let preferred_netease = preferred_source
         .as_deref()
         .is_some_and(|source| source.to_ascii_lowercase().contains("cloudmusic"));
-    if (preferred_source.is_none() || preferred_netease)
+    let session = match active_media_session(preferred_source.as_deref()).await {
+        Ok(session) => session,
+        Err(error) => {
+            if (preferred_source.is_none() || preferred_netease) && let Some(track) = netease_track {
+                return Ok(netease_media_snapshot(track, captured_at_ms));
+            }
+            return Err(error);
+        }
+    };
+    let has_netease_session = session.as_ref().is_some_and(|session| {
+        session.SourceAppUserModelId().ok().is_some_and(|source| needs_netease_clock(&source.to_string()))
+    });
+    if !has_netease_session && (preferred_source.is_none() || preferred_netease)
         && netease_track.as_ref().is_some_and(|track| track.is_playing)
     {
         return Ok(netease_media_snapshot(
@@ -463,7 +433,7 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
         ));
     }
 
-    let Some(session) = active_media_session(preferred_source.as_deref()).await? else {
+    let Some(session) = session else {
         if (preferred_source.is_none() || preferred_netease) && let Some(track) = netease_track {
             return Ok(netease_media_snapshot(track, captured_at_ms));
         }
@@ -859,6 +829,16 @@ async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Option<String
         .map(decode_entities)
 }
 
+fn lyrics_http_client() -> &'static reqwest::Client {
+    LYRICS_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(7))
+            .user_agent(concat!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/", env!("CARGO_PKG_VERSION")))
+            .build().expect("lyrics HTTP client should initialize")
+    })
+}
+
 #[tauri::command]
 async fn search_lyrics_candidates(
     title: String,
@@ -869,13 +849,7 @@ async fn search_lyrics_candidates(
     if title.trim().is_empty() {
         return Err("当前歌曲没有可用于搜索的标题".to_string());
     }
-    let client = HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.2")
-            .build()
-            .expect("HTTP client should initialize")
-    });
+    let client = lyrics_http_client();
     let mut results = Vec::new();
     let mut seen = HashSet::new();
 
@@ -941,7 +915,11 @@ async fn fetch_lyrics_candidate(
     title: String,
     artist: String,
 ) -> Result<LyricsResult, String> {
-    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
+    if !(provider == "netease" && !id.is_empty() && id.len() <= 20 && id.chars().all(|character| character.is_ascii_digit())
+        || provider == "qq" && (8..=32).contains(&id.len()) && id.chars().all(|character| character.is_ascii_alphanumeric())) {
+        return Err("歌曲标识无效".to_string());
+    }
+    let client = lyrics_http_client();
     let lrc = match provider.as_str() {
         "netease" => fetch_netease_lrc(client, &id).await,
         "qq" => fetch_qq_lrc(client, &id).await,
@@ -992,7 +970,7 @@ async fn check_for_update() -> Result<UpdateInfo, String> {
     let client = HTTP_CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.2")
+            .user_agent(concat!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("HTTP client should initialize")
     });
@@ -1159,16 +1137,17 @@ async fn fetch_lyrics(
     source: String,
     track_id: String,
 ) -> Result<LyricsResult, String> {
+    tokio::time::timeout(Duration::from_secs(25), fetch_lyrics_inner(title, artist, album, duration_ms, source, track_id))
+        .await.map_err(|_| "在线歌词查询超时，请稍后重试或指定歌词".to_string())?
+}
+
+async fn fetch_lyrics_inner(
+    title: String, artist: String, album: String, duration_ms: i64, source: String, track_id: String,
+) -> Result<LyricsResult, String> {
     if title.trim().is_empty() {
         return Err("当前播放器暂未提供歌曲名称".to_string());
     }
-    let client = HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/1.1.2")
-            .build()
-            .expect("HTTP client should initialize")
-    });
+    let client = lyrics_http_client();
     if source.to_ascii_lowercase().contains("cloudmusic")
         && let Some(result) =
             fetch_netease_lyrics(client, &title, &artist, duration_ms, &track_id).await
@@ -1251,7 +1230,7 @@ mod tests {
         let fonts = super::list_system_fonts().expect("Windows fonts should be readable");
         println!("detected {} installed font families", fonts.len());
         assert!(fonts.len() > 10);
-        assert!(fonts.iter().all(|font| !font.is_empty() && !font.starts_with('@')));
+        assert!(fonts.iter().all(|font| !font.family.is_empty() && !font.family.starts_with('@')));
     }
 
     #[test]
@@ -1340,7 +1319,7 @@ mod tests {
     fn reads_the_live_github_release_feed() {
         let update = tauri::async_runtime::block_on(super::check_for_update())
             .expect("GitHub latest release should be readable");
-        assert_eq!(update.current_version, "1.1.2");
+        assert_eq!(update.current_version, env!("CARGO_PKG_VERSION"));
         assert!(!update.latest_version.is_empty());
         assert!(update.download_url.starts_with("https://github.com/"));
         assert_eq!(update.sha256.len(), 64);
@@ -1585,6 +1564,20 @@ fn save_preferences(app: AppHandle, preferences: Value) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn save_display_backup(app: AppHandle, contents: String) -> Result<bool, String> {
+    if contents.len() > 1_048_576 { return Err("显示备份过大".to_string()); }
+    let backup: Value = serde_json::from_str(&contents).map_err(error_text)?;
+    if backup["format"] != "riverxilee-display-profiles" || backup["version"] != 1 {
+        return Err("显示备份格式无效".to_string());
+    }
+    let Some(path) = app.dialog().file().add_filter("RiverXILee 显示备份", &["json"])
+        .set_file_name("RiverXILee-display-backup.json").blocking_save_file() else { return Ok(false); };
+    let path = path.into_path().map_err(error_text)?;
+    fs::write(path, contents).map_err(error_text)?;
+    Ok(true)
+}
+
+#[tauri::command]
 fn set_global_shortcuts(
     app: AppHandle,
     shortcuts: HashMap<String, String>,
@@ -1650,6 +1643,7 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_placement(&window)?;
@@ -1719,6 +1713,7 @@ pub fn run() {
             set_window_visible,
             load_preferences,
             save_preferences,
+            save_display_backup,
             set_global_shortcuts
         ])
         .run(tauri::generate_context!())

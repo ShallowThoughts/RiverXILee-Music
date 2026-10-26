@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$releaseVersion = "1.1.2"
+$releaseVersion = "1.1.3"
 $payloadDirectory = Join-Path $projectRoot "src-tauri\target\release\bundle\nsis"
 $installerManifest = Join-Path $projectRoot "installer-ui\src-tauri\Cargo.toml"
 $installerBinary = Join-Path $projectRoot "installer-ui\src-tauri\target\release\riverxilee-installer-center.exe"
@@ -11,6 +11,7 @@ $releaseInstaller = Join-Path $releaseDirectory "RiverXILee-Desktop-Lyrics_${rel
 Push-Location $projectRoot
 try {
     npm run tauri build
+    if ($LASTEXITCODE -ne 0) { throw "Desktop lyrics build failed" }
     $payloadPath = Get-ChildItem -LiteralPath $payloadDirectory -File |
         Where-Object { $_.Name -like "*_${releaseVersion}_x64-setup.exe" } |
         Select-Object -First 1 -ExpandProperty FullName
@@ -19,6 +20,7 @@ try {
     }
 
     cargo build --release --manifest-path $installerManifest
+    if ($LASTEXITCODE -ne 0) { throw "Installer center build failed" }
     if (-not (Test-Path -LiteralPath $installerBinary)) {
         throw "RiverXILee installer center was not generated at $installerBinary"
     }

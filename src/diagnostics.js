@@ -9,6 +9,7 @@ export function lyricProvider(match) {
   const id = String(match?.songMid ?? "").toLowerCase();
   if (id.startsWith("netease:")) return "网易云音乐";
   if (id.startsWith("qq:")) return "QQ 音乐";
+  if (id.startsWith("local:")) return "本地歌词文件";
   return match ? "在线匹配" : "尚未匹配";
 }
 
@@ -33,6 +34,7 @@ export function buildDiagnosticReport(data) {
     `专辑：${data.album || "未知"}`,
     `播放进度：${formatMilliseconds(data.positionMs)} / ${formatMilliseconds(data.durationMs)}`,
     `歌词状态：${data.lyricStatus || "idle"}`,
+    `歌词请求次数：${data.lyricAttempts || 0}`,
     `歌词来源：${lyricProvider(data.lyricMatch)}`,
     `歌词格式：${lyricTimingType(data.lines || [])}`,
     `缓存状态：${data.lyricFromCache ? "正在使用缓存" : "在线结果或尚未缓存"}`,

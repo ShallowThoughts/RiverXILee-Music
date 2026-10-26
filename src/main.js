@@ -6,6 +6,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { buildDiagnosticReport, lyricProvider, lyricTimingType } from "./diagnostics.js";
 import { findActiveLine, lineProgress, parseLrc, visibleLineIndices, wordProgress } from "./lyrics.js";
+import { createLyricSession, legacyTrackKey, matchingLegacyKeys } from "./lyric-session.js";
+import { parseSongLink, readLyricFile } from "./lyric-links.js";
+import { createFontPicker, resolveInstalledFont } from "./font-picker.js";
 import { playbackAnchor, playbackPosition, reconcilePlaybackAnchor } from "./playback.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -19,6 +22,10 @@ import {
   applyDisplayPreset,
   DEFAULT_DISPLAY_SETTINGS,
   DISPLAY_PRESETS,
+  displayBackup,
+  mergeDisplayProfiles,
+  parseDisplayBackup,
+  sanitizeDisplayProfiles,
   hexToRgb,
   lyricFontFamily,
   rgbToHex,
@@ -27,12 +34,14 @@ import {
 import "./styles.css";
 
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
-const APP_VERSION = "1.1.2";
+const APP_VERSION = "1.1.3";
 const DISPLAY_SETTINGS_KEY = "riverxilee-desktop-lyrics.display.v1";
 const SHORTCUTS_KEY = "riverxilee-desktop-lyrics.shortcuts.v1";
 const PLAYER_KEY = "riverxilee-desktop-lyrics.player.v1";
 const OFFSETS_KEY = "riverxilee-desktop-lyrics.offsets.v1";
 const LYRICS_CACHE_KEY = "riverxilee-desktop-lyrics.cache.v1";
+const DISPLAY_PROFILES_KEY = "riverxilee-desktop-lyrics.profiles.v1";
+const MELODY_KEY = "riverxilee-desktop-lyrics.melody.v1";
 const PREVIEW_LRC = `[00:00.00]RiverXILee桌面歌词
 [00:05.00]让音乐留在画面中央
 [00:10.00]透明 · 安静 · 同步
@@ -100,6 +109,8 @@ const state = {
   lyricCache: loadJson(LYRICS_CACHE_KEY, "lyricCache", {}),
   shortcuts: sanitizeShortcuts(loadJson(SHORTCUTS_KEY, "shortcuts", {})),
   display: loadDisplaySettings(),
+  displayProfiles: sanitizeDisplayProfiles(loadJson(DISPLAY_PROFILES_KEY, "displayProfiles", [])),
+  discoveredMelody: loadJson(MELODY_KEY, "discoveredMelody", false) === true,
 };
 
 let preferenceSaveQueue = Promise.resolve();
@@ -112,6 +123,8 @@ function persistNativePreferences() {
     preferredSource: state.preferredSource,
     offsets: state.offsets,
     lyricCache: state.lyricCache,
+    displayProfiles: state.displayProfiles,
+    discoveredMelody: state.discoveredMelody,
   };
   preferenceSaveQueue = preferenceSaveQueue
     .catch(() => {})
@@ -224,6 +237,7 @@ document.querySelector("#app").innerHTML = `
         <button class="settings-tab" type="button" data-settings-tab="sync">同步</button>
         <button class="settings-tab" type="button" data-settings-tab="status">状态</button>
         <button class="settings-tab" type="button" data-settings-tab="shortcuts">快捷键</button>
+        <button class="settings-tab" type="button" data-settings-tab="about">关于</button>
       </nav>
 
       <section class="settings-section is-active" data-settings-section="display">
@@ -263,12 +277,12 @@ document.querySelector("#app").innerHTML = `
             <option value="none">关闭动效</option>
           </select>
         </label>
-        <label class="setting-control setting-control-wide">
-          <span>歌词字体 <output id="font-count">正在读取本机字体…</output></span>
-          <input class="font-family-input" id="font-family-select" data-setting="fontFamily"
-            list="system-font-options" autocomplete="off" placeholder="输入名称搜索本机字体" aria-label="搜索并选择本机字体" />
-          <datalist id="system-font-options"></datalist>
-        </label>
+        <div class="setting-control setting-control-wide">
+          <span id="font-control-label">歌词字体 <output id="font-count">正在读取本机字体…</output></span>
+          <button class="font-picker-button" id="font-family-select" type="button" aria-label="选择歌词字体" aria-haspopup="listbox" aria-expanded="false" aria-controls="font-option-list">
+            <span id="font-selected-label"></span><i class="ph ph-caret-down" aria-hidden="true"></i>
+          </button>
+        </div>
         <label class="setting-control setting-control-wide">
           <span>显示预设</span>
           <span class="preset-control">
@@ -287,6 +301,25 @@ document.querySelector("#app").innerHTML = `
         <label>G <input type="number" min="0" max="255" step="1" data-color-channel="g" /></label>
         <label>B <input type="number" min="0" max="255" step="1" data-color-channel="b" /></label>
        </div>
+       <details class="personal-profiles">
+        <summary>我的显示方案 <span id="profile-count">0 / 20</span></summary>
+        <div class="profile-editor">
+          <label class="setting-control"><span>已保存方案</span><select id="personal-profile-select"><option value="">选择个人方案</option></select></label>
+          <label class="setting-control"><span>方案名称</span><input class="setting-text" id="profile-name" maxlength="40" placeholder="例如：日常桌面、打游戏" /></label>
+          <div class="profile-actions">
+            <button class="text-button" id="profile-save-button" type="button">保存当前样式</button>
+            <button class="text-button" id="profile-apply-button" type="button">应用</button>
+            <button class="text-button" id="profile-rename-button" type="button">重命名</button>
+            <button class="text-button" id="profile-delete-button" type="button">删除</button>
+          </div>
+          <div class="profile-backup-actions">
+            <button class="text-button" id="profile-export-button" type="button"><i class="ph ph-export" aria-hidden="true"></i> 导出备份</button>
+            <button class="text-button" id="profile-import-button" type="button"><i class="ph ph-import" aria-hidden="true"></i> 导入备份</button>
+          </div>
+          <p class="setting-help">备份包含当前样式与个人方案。导入会恢复样式并合并方案；字体需要在本机安装。</p>
+          <input id="profile-file-input" type="file" accept=".json,application/json" hidden />
+        </div>
+       </details>
       </section>
 
       <section class="settings-section" data-settings-section="status">
@@ -322,6 +355,18 @@ document.querySelector("#app").innerHTML = `
             <button class="text-button" id="find-version-button" type="button">手动选择</button>
           </div>
           <div class="candidate-browser" id="candidate-browser" aria-live="polite"></div>
+          <details class="lyric-recovery">
+            <summary>指定歌曲或导入歌词</summary>
+            <p class="setting-help" id="lyric-binding-target">播放歌曲后可绑定歌词</p>
+            <label class="setting-control"><span>网易云 / QQ 音乐歌曲链接</span><input class="setting-text" id="song-link-input" type="text" maxlength="2048" placeholder="粘贴完整歌曲链接" /></label>
+            <div class="profile-actions">
+              <button class="text-button" id="song-link-button" type="button">获取并绑定</button>
+              <button class="text-button" id="lyric-import-button" type="button">导入 LRC 歌词</button>
+              <button class="text-button" id="lyric-auto-button" type="button">恢复自动匹配</button>
+            </div>
+            <p class="setting-help">手动选择会绑定到当前歌曲并保存在本地。支持带时间标签的 LRC、YRC、QRC，不需要音频文件。</p>
+            <input id="lyric-file-input" type="file" accept=".lrc,.yrc,.qrc,text/plain" hidden />
+          </details>
           <div class="sync-row">
             <div class="sync-copy"><strong>歌词缓存</strong><span id="cache-status">尚无缓存</span></div>
             <button class="text-button" id="cache-clear-button" type="button">清空缓存</button>
@@ -331,6 +376,16 @@ document.querySelector("#app").innerHTML = `
             <input class="switch-input" id="autostart-switch" type="checkbox" />
           </label>
         </div>
+      </section>
+
+      <section class="settings-section about-section" data-settings-section="about">
+        <div class="about-identity">
+          <button class="about-mark" id="about-mark" type="button" aria-label="RiverXILee 标志"><i class="ph ph-waveform" aria-hidden="true"></i></button>
+          <div><strong>RiverXILee桌面歌词</strong><span>v${APP_VERSION} · 由 RiverXILee 制作</span></div>
+          <button class="melody-replay icon-button" id="melody-replay" type="button" title="重温隐藏的旋律" aria-label="重温隐藏的旋律" ${state.discoveredMelody ? "" : "hidden"}><i class="ph-fill ph-star-four" aria-hidden="true"></i></button>
+        </div>
+        <p class="about-description">把音乐留在看得见的地方。<br />透明、安静，跟随每一句。</p>
+        <p class="about-note" id="melody-discovery" role="status">${state.discoveredMelody ? "你发现了一段隐藏的旋律。" : "愿每一句喜欢的歌词，都有停留的地方。"}</p>
       </section>
 
       <section class="settings-section" data-settings-section="shortcuts">
@@ -358,6 +413,12 @@ document.querySelector("#app").innerHTML = `
       </div>
     </aside>
 
+    <div class="font-picker-popup" id="font-picker-popup" popover="manual" hidden>
+      <input class="font-search-input" id="font-search-input" type="search" autocomplete="off" maxlength="256" placeholder="搜索中文名或英文名" role="combobox" aria-label="搜索本机字体" aria-controls="font-option-list" aria-expanded="false" aria-autocomplete="list" />
+      <div class="font-option-list" id="font-option-list" role="listbox" aria-label="本机已安装字体"></div>
+      <p class="font-picker-status" id="font-picker-status" role="status"></p>
+    </div>
+
     <section class="update-banner" id="update-banner" aria-live="polite" aria-hidden="true">
       <div class="liquid-layer" aria-hidden="true"></div>
       <i class="ph ph-arrow-circle-up" aria-hidden="true"></i>
@@ -373,6 +434,18 @@ document.querySelector("#app").innerHTML = `
     </section>
 
     <div class="toast" id="toast" role="status"></div>
+    <dialog class="melody-dialog" id="melody-dialog" aria-labelledby="melody-title" aria-describedby="melody-message">
+      <button class="icon-button melody-close" id="melody-close" type="button" aria-label="关闭隐藏旋律" autofocus><i class="ph ph-x" aria-hidden="true"></i></button>
+      <div class="melody-art" aria-hidden="true">
+        <svg class="melody-wave" viewBox="0 0 640 120">
+          <defs><linearGradient id="melody-gradient"><stop offset="0" stop-color="#ff5ca8"/><stop offset=".5" stop-color="#6cdeff"/><stop offset="1" stop-color="#80f6ca"/></linearGradient></defs>
+          <path d="M20 60 H100 L120 60 L138 39 L158 84 L184 18 L210 101 L238 44 L260 71 L288 30 L320 90 L350 39 L378 81 L406 23 L434 95 L460 46 L482 73 L508 39 L532 77 L554 54 L574 60 H620"/>
+        </svg>
+        <div class="melody-particles">${Array.from({ length: 18 }, (_, index) => `<span style="--particle-x:${(index - 8.5) * 28}px;--particle-y:${Math.sin(index * 2.4) * 74}px;--particle-delay:${index * 12}ms"></span>`).join("")}</div>
+      </div>
+      <h1 id="melody-title">RiverXILee</h1>
+      <p id="melody-message">谢谢你，让每一句歌词都有停留的地方。</p>
+    </dialog>
   </main>
 `;
 
@@ -406,8 +479,9 @@ const elements = {
   diagnosticSummary: document.querySelector("#diagnostic-summary"),
   displayPreset: document.querySelector("#display-preset-select"),
   fontFamily: document.querySelector("#font-family-select"),
-  fontOptions: document.querySelector("#system-font-options"),
   fontCount: document.querySelector("#font-count"),
+  personalProfile: document.querySelector("#personal-profile-select"),
+  profileName: document.querySelector("#profile-name"),
 };
 
 for (const [value, preset] of Object.entries(DISPLAY_PRESETS)) {
@@ -421,26 +495,33 @@ let downloadedInstallerPath = "";
 
 const FALLBACK_FONTS = [
   "Segoe UI Variable Display",
-  "Microsoft YaHei UI",
-  "Microsoft JhengHei UI",
+  { family: "Microsoft YaHei UI", displayName: "微软雅黑 UI", aliases: ["Microsoft YaHei UI", "微软雅黑 UI"] },
+  { family: "Microsoft JhengHei UI", displayName: "微軟正黑體 UI", aliases: ["Microsoft JhengHei UI", "微軟正黑體 UI"] },
   "Arial",
 ];
+
+const fontPicker = createFontPicker({
+  button: elements.fontFamily,
+  popup: document.querySelector("#font-picker-popup"),
+  search: document.querySelector("#font-search-input"),
+  list: document.querySelector("#font-option-list"),
+  status: document.querySelector("#font-picker-status"),
+  label: document.querySelector("#font-selected-label"),
+  getSelected: () => state.display.fontFamily,
+  onSelect: (family) => updateSettingValue("fontFamily", family),
+});
 
 async function loadSystemFonts() {
   let fonts = FALLBACK_FONTS;
   try {
     if (IS_TAURI) fonts = await invoke("list_system_fonts");
-    fonts = [...new Set([...fonts, state.display.fontFamily])]
-      .filter(Boolean)
-      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+    const catalog = fontPicker.setFonts(fonts);
+    const installed = resolveInstalledFont(catalog, state.display.fontFamily);
+    if (installed && installed !== state.display.fontFamily) updateSettingValue("fontFamily", installed);
+    elements.fontCount.textContent = `${IS_TAURI ? "已识别" : "浏览器预览"} ${catalog.length} 款`;
   } catch {
+    fontPicker.setFonts(FALLBACK_FONTS);
     elements.fontCount.textContent = "读取失败，显示常用字体";
-  }
-  elements.fontOptions.replaceChildren(...fonts.map((font) => new Option(font, font)));
-  elements.fontFamily.value = state.display.fontFamily;
-  elements.fontFamily.style.fontFamily = `"${state.display.fontFamily.replace(/["'\\]/g, "")}", sans-serif`;
-  if (elements.fontCount.textContent !== "读取失败，显示常用字体") {
-    elements.fontCount.textContent = `已识别 ${fonts.length} 款`;
   }
 }
 
@@ -491,7 +572,7 @@ function updateSettingValue(path, value) {
 
 function syncSettingsPanel() {
   for (const input of settingInputs) input.value = state.display[input.dataset.setting];
-  elements.fontFamily.style.fontFamily = `"${state.display.fontFamily.replace(/["'\\]/g, "")}", sans-serif`;
+  fontPicker.sync();
   for (const input of colorInputs) input.value = state.display.color[input.dataset.colorChannel];
   elements.colorPicker.value = rgbToHex(state.display.color);
 
@@ -534,10 +615,12 @@ function applyDisplaySettings({ rerender = true } = {}) {
 }
 
 function setSettingsOpen(open) {
+  if (!open) fontPicker.close();
   state.settingsOpen = open;
   elements.settingsPanel.classList.toggle("is-open", open);
   elements.settingsPanel.setAttribute("aria-hidden", String(!open));
   elements.settings.classList.toggle("is-active", open);
+  elements.settingsPanel.inert = !open;
 }
 
 function formatTime(milliseconds) {
@@ -584,6 +667,9 @@ function syncTrackTools() {
   elements.playerModeStatus.textContent = state.preferredSource
     ? `已锁定 ${platformName(state.preferredSource)}`
     : "自动选择";
+  document.querySelector("#lyric-binding-target").textContent = state.trackKey
+    ? `绑定到：${state.title}${state.artist ? ` · ${state.artist}` : ""}`
+    : "播放歌曲后可绑定歌词";
 }
 
 function diagnosticData() {
@@ -608,6 +694,9 @@ function renderDiagnostics() {
     ["歌词", `${lyricProvider(state.lyricMatch)} · ${lyricTimingType(state.lines)}${state.lyricFromCache ? " · 本地缓存" : ""}`],
     ["同步", `${state.syncDriftMs > 0 ? "+" : ""}${state.syncDriftMs} ms · ${state.syncCorrection === "snap" ? "已重新锁定" : state.syncCorrection === "smooth" ? "平滑纠偏" : "稳定"}`],
     ["连接", state.mediaPollFailures ? `连续失败 ${state.mediaPollFailures} 次 · 正在重试` : "读取正常"],
+    ["歌词加载", state.lyricStatus === "loading" ? `正在在线查询 · 第 ${state.lyricAttempts} 次`
+      : state.lyricStatus === "error" ? `${Math.max(0, Math.ceil((state.lyricRetryAt - performance.now()) / 1000))} 秒后自动重试`
+        : state.lyricStatus === "ready" ? (state.lyricMatch?.manuallySelected ? "手动绑定" : "已就绪") : "等待歌曲"],
   ];
   elements.diagnosticSummary.replaceChildren();
   for (const [label, value] of rows) {
@@ -709,7 +798,26 @@ function renderLyricWindow(activeIndex) {
     return;
   }
   if (state.lyricStatus === "error") {
-    setStageMessage("暂时没有匹配到歌词", state.lyricMessage || "切换歌曲后会自动重试");
+    setStageMessage("歌词暂未获取，将自动重试", state.lyricMessage || "可尝试其他歌词版本或导入 LRC");
+    const actions = document.createElement("div");
+    actions.className = "empty-actions";
+    const retry = document.createElement("button");
+    retry.className = "text-button";
+    retry.type = "button";
+    retry.textContent = "立即重试";
+    retry.addEventListener("click", () => lyricSession.retry());
+    const recover = document.createElement("button");
+    recover.className = "text-button";
+    recover.type = "button";
+    recover.textContent = "指定歌词";
+    recover.addEventListener("click", () => {
+      setSettingsOpen(true);
+      document.querySelector('[data-settings-tab="sync"]').click();
+      document.querySelector(".lyric-recovery").open = true;
+      document.querySelector("#song-link-input").focus();
+    });
+    actions.append(retry, recover);
+    elements.stack.querySelector(".empty-state").append(actions);
     return;
   }
   if (!state.connected) {
@@ -856,58 +964,22 @@ function updateConnectionUi() {
   setButtonIcon(elements.play, state.isPlaying ? "pause" : "play", true);
 }
 
-async function loadLyrics(snapshot, trackKey) {
-  const token = ++state.fetchToken;
-  state.lyricAttempts += 1;
-  state.lyricStatus = "loading";
-  state.lyricMessage = "";
-  state.lyricFromCache = false;
-  state.lines = [];
-  state.activeIndex = Number.NaN;
-  renderLyricWindow(-1);
-
-  const cached = state.lyricCache[trackKey];
-  if (cached?.lrc) {
-    const cachedLines = parseLrc(cached.lrc);
-    if (cachedLines.length) {
-      state.lines = cachedLines;
-      state.lyricStatus = "ready";
-      state.lyricMatch = cached;
-      state.lyricFromCache = true;
-      state.activeIndex = Number.NaN;
-      cached.savedAt = Date.now();
-      saveLyricsCache();
-      return;
-    }
-  }
-
-  try {
-    const result = await invoke("fetch_lyrics", {
-      title: snapshot.title,
-      artist: snapshot.artist,
-      album: snapshot.album,
-      durationMs: snapshot.durationMs,
-      source: snapshot.source,
-      trackId: snapshot.trackId || "",
-    });
-    if (token !== state.fetchToken || trackKey !== state.trackKey) return;
-    state.lines = parseLrc(result.lrc);
-    if (!state.lines.length) throw new Error("歌词没有可用的时间标签");
-    state.lyricStatus = "ready";
-    state.lyricMatch = result;
-    state.lyricFromCache = false;
-    state.activeIndex = Number.NaN;
-    state.lyricCache[trackKey] = { ...result, savedAt: Date.now() };
-    saveLyricsCache();
-  } catch (error) {
-    if (token !== state.fetchToken || trackKey !== state.trackKey) return;
-    state.lyricStatus = "error";
-    state.lyricRetryAt = performance.now() + 5_000 * state.lyricAttempts;
-    state.lyricMessage = String(error).replace(/^.*?: /, "");
-    renderLyricWindow(-1);
+const lyricSession = createLyricSession({
+  state,
+  request: (snapshot) => invoke("fetch_lyrics", {
+    title: snapshot.title,
+    artist: snapshot.artist,
+    album: snapshot.album,
+    durationMs: snapshot.durationMs,
+    source: snapshot.source,
+    trackId: snapshot.trackId || "",
+  }),
+  save: saveLyricsCache,
+  notify() {
+    renderLyricWindow(findActiveLine(state.lines, estimatedPosition() - state.lyricOffsetMs));
     renderDiagnostics();
-  }
-}
+  },
+});
 
 let mediaPollInFlight = false;
 
@@ -946,25 +1018,13 @@ async function pollMedia() {
     if (!wasConnected) state.activeIndex = Number.NaN;
     updateConnectionUi();
 
-    const trackKey = snapshot.connected && snapshot.title
-      ? `${snapshot.source}\u0000${snapshot.trackId || ""}\u0000${snapshot.title}\u0000${snapshot.artist}\u0000${snapshot.album}\u0000${snapshot.durationMs}`
-      : "";
-    if (trackKey !== state.trackKey) {
-      state.trackKey = trackKey;
-      state.lines = [];
-      state.activeIndex = Number.NaN;
-      state.lyricStatus = "idle";
-      state.lyricMatch = null;
-      state.lyricFromCache = false;
-      state.fetchToken += 1;
-      state.lyricAttempts = 0;
-      state.lyricOffsetMs = state.offsets[trackKey] ?? 0;
+    if (lyricSession.update(snapshot)) {
+      state.lyricOffsetMs = state.offsets[state.trackKey] ?? state.offsets[legacyTrackKey(snapshot)]
+        ?? state.offsets[matchingLegacyKeys(state.offsets, snapshot)[0]] ?? 0;
+      elements.candidateBrowser.replaceChildren();
+      elements.candidateBrowser.classList.remove("is-visible");
+      document.querySelector("#song-link-input").value = "";
       syncTrackTools();
-      if (trackKey) loadLyrics(snapshot, trackKey);
-      else renderLyricWindow(-1);
-    } else if (trackKey && state.lyricStatus === "error"
-      && state.lyricAttempts < 3 && performance.now() >= state.lyricRetryAt) {
-      loadLyrics(snapshot, trackKey);
     }
     renderDiagnostics();
   } catch (error) {
@@ -973,6 +1033,7 @@ async function pollMedia() {
     state.positionMs = estimatedPosition();
     state.syncedAt = performance.now();
     if (state.mediaPollFailures >= 3) {
+      lyricSession.invalidate();
       state.isPlaying = false;
       state.connected = false;
       state.source = "";
@@ -1046,7 +1107,7 @@ document.querySelectorAll("[data-media-action]").forEach((button) => {
 });
 
 document.querySelector("#lyrics-stage").addEventListener("mousedown", (event) => {
-  if (event.button === 0 && IS_TAURI && !state.locked) {
+  if (event.button === 0 && IS_TAURI && !state.locked && !event.target.closest("button, input")) {
     invoke("start_dragging");
   }
 });
@@ -1071,6 +1132,7 @@ document.querySelector("#settings-close-button").addEventListener("click", () =>
 
 for (const tab of document.querySelectorAll("[data-settings-tab]")) {
   tab.addEventListener("click", () => {
+    fontPicker.close();
     for (const item of document.querySelectorAll("[data-settings-tab]")) {
       item.classList.toggle("is-active", item === tab);
     }
@@ -1119,6 +1181,142 @@ document.querySelector("#apply-preset-button").addEventListener("click", () => {
   showToast(`已应用${DISPLAY_PRESETS[presetName]?.label ?? "显示"}预设`);
 });
 
+function refreshDisplayProfiles(selected = elements.personalProfile.value) {
+  elements.personalProfile.replaceChildren(new Option("选择个人方案", ""));
+  for (const profile of state.displayProfiles) elements.personalProfile.append(new Option(profile.name, profile.id));
+  elements.personalProfile.value = selected;
+  const hasSelection = state.displayProfiles.some((profile) => profile.id === elements.personalProfile.value);
+  for (const action of ["apply", "rename", "delete"]) document.querySelector(`#profile-${action}-button`).disabled = !hasSelection;
+  document.querySelector("#profile-count").textContent = `${state.displayProfiles.length} / 20`;
+}
+
+function saveDisplayProfiles(selected) {
+  localStorage.setItem(DISPLAY_PROFILES_KEY, JSON.stringify(state.displayProfiles));
+  persistNativePreferences();
+  refreshDisplayProfiles(selected);
+}
+
+elements.personalProfile.addEventListener("change", () => {
+  const profile = state.displayProfiles.find((item) => item.id === elements.personalProfile.value);
+  elements.profileName.value = profile?.name || "";
+  refreshDisplayProfiles();
+});
+
+document.querySelector("#profile-save-button").addEventListener("click", () => {
+  const name = elements.profileName.value.trim();
+  if (!name) { elements.profileName.focus(); showToast("先给显示方案起个名字"); return; }
+  const existing = state.displayProfiles.find((item) => item.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+  if (!existing && state.displayProfiles.length >= 20) { showToast("最多保存 20 个方案，可以先导出备份再整理"); return; }
+  const profile = { id: existing?.id || crypto.randomUUID(), name, settings: sanitizeDisplaySettings(state.display) };
+  state.displayProfiles = existing ? state.displayProfiles.map((item) => item.id === existing.id ? profile : item) : [...state.displayProfiles, profile];
+  saveDisplayProfiles(profile.id);
+  showToast(`已${existing ? "更新" : "保存"}「${name}」`);
+});
+
+document.querySelector("#profile-apply-button").addEventListener("click", () => {
+  const profile = state.displayProfiles.find((item) => item.id === elements.personalProfile.value);
+  if (!profile) return;
+  state.display = sanitizeDisplaySettings(profile.settings);
+  saveDisplaySettings();
+  applyDisplaySettings();
+  showToast(`已应用「${profile.name}」`);
+});
+
+document.querySelector("#profile-rename-button").addEventListener("click", () => {
+  const profile = state.displayProfiles.find((item) => item.id === elements.personalProfile.value);
+  if (!profile) return;
+  const name = elements.profileName.value.trim();
+  if (!name) { elements.profileName.focus(); showToast("请输入新的方案名称"); return; }
+  if (state.displayProfiles.some((item) => item.id !== profile.id && item.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+    showToast("这个方案名称已被使用"); return;
+  }
+  profile.name = name;
+  saveDisplayProfiles(profile.id);
+  showToast("方案已重命名");
+});
+
+document.querySelector("#profile-delete-button").addEventListener("click", () => {
+  const profile = state.displayProfiles.find((item) => item.id === elements.personalProfile.value);
+  if (!profile) return;
+  state.displayProfiles = state.displayProfiles.filter((item) => item.id !== profile.id);
+  elements.profileName.value = "";
+  saveDisplayProfiles("");
+  showToast(`已删除「${profile.name}」，当前显示样式保留`);
+});
+
+document.querySelector("#profile-export-button").addEventListener("click", async () => {
+  const contents = displayBackup(state.display, state.displayProfiles);
+  try {
+    if (IS_TAURI) {
+      if (!(await invoke("save_display_backup", { contents }))) return;
+    } else {
+      const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "RiverXILee-display-backup.json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    }
+    showToast("显示备份已导出");
+  } catch (error) { showToast(`导出失败：${error}`, 4_000); }
+});
+
+document.querySelector("#profile-import-button").addEventListener("click", () => document.querySelector("#profile-file-input").click());
+document.querySelector("#profile-file-input").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  try {
+    if (file.size > 1_048_576) throw new Error("请选择不超过 1 MB 的显示备份");
+    const backup = parseDisplayBackup(await file.text());
+    state.displayProfiles = mergeDisplayProfiles(state.displayProfiles, backup.profiles);
+    state.display = backup.display;
+    saveDisplaySettings();
+    saveDisplayProfiles("");
+    elements.profileName.value = "";
+    applyDisplaySettings();
+    showToast("已恢复显示样式并合并方案；最多保留 20 个", 3_500);
+  } catch (error) { showToast(error.message, 4_000); }
+});
+
+let melodyClicks = 0;
+let lastMelodyClick = 0;
+let melodyTimer;
+let melodyReturnFocus;
+const melodyDialog = document.querySelector("#melody-dialog");
+
+function closeMelody() {
+  clearTimeout(melodyTimer);
+  if (melodyDialog.open) melodyDialog.close();
+}
+
+function openMelody() {
+  if (melodyDialog.open) return;
+  melodyReturnFocus = document.activeElement;
+  state.discoveredMelody = true;
+  localStorage.setItem(MELODY_KEY, "true");
+  persistNativePreferences();
+  document.querySelector("#melody-replay").hidden = false;
+  document.querySelector("#melody-discovery").textContent = "你发现了一段隐藏的旋律。";
+  melodyDialog.showModal();
+  melodyTimer = setTimeout(closeMelody, 3_200);
+}
+
+document.querySelector("#about-mark").addEventListener("click", () => {
+  const now = performance.now();
+  melodyClicks = now - lastMelodyClick < 2_000 ? melodyClicks + 1 : 1;
+  lastMelodyClick = now;
+  if (melodyClicks >= 7) { melodyClicks = 0; openMelody(); }
+});
+document.querySelector("#melody-replay").addEventListener("click", openMelody);
+melodyDialog.addEventListener("click", closeMelody);
+melodyDialog.addEventListener("cancel", (event) => { event.preventDefault(); closeMelody(); });
+melodyDialog.addEventListener("close", () => {
+  clearTimeout(melodyTimer);
+  if (melodyReturnFocus?.isConnected) melodyReturnFocus.focus({ preventScroll: true });
+});
+document.addEventListener("visibilitychange", () => { if (document.hidden) closeMelody(); });
+
 document.querySelector("#copy-diagnostics-button").addEventListener("click", async () => {
   const report = buildDiagnosticReport(diagnosticData());
   try {
@@ -1164,6 +1362,7 @@ document.querySelector("#offset-reset-button").addEventListener("click", () => a
 document.querySelector("#resync-button").addEventListener("click", () => {
   state.syncedAt = performance.now();
   pollMedia();
+  if (state.lyricStatus === "error") lyricSession.retry();
   showToast("正在重新读取播放器进度");
 });
 
@@ -1171,31 +1370,27 @@ function candidateDuration(milliseconds) {
   return milliseconds > 0 ? formatTime(milliseconds) : "时长未知";
 }
 
-async function chooseLyricsCandidate(candidate, button) {
-  if (!state.trackKey) return;
+async function chooseLyricsCandidate(candidate, button, trackKey) {
+  if (!state.trackKey || trackKey !== state.trackKey) return;
   button.disabled = true;
   try {
-    const result = await invoke("fetch_lyrics_candidate", {
+    const applied = await lyricSession.bind(() => invoke("fetch_lyrics_candidate", {
       provider: candidate.provider,
       id: candidate.id,
       title: candidate.title,
       artist: candidate.artist,
-    });
-    const lines = parseLrc(result.lrc);
-    if (!lines.length) throw new Error("这个版本没有可用的时间标签");
-    state.lines = lines;
-    state.activeIndex = Number.NaN;
-    state.lyricStatus = "ready";
-    state.lyricMatch = result;
-    state.lyricFromCache = false;
-    state.lyricCache[state.trackKey] = { ...result, savedAt: Date.now(), manuallySelected: true };
-    saveLyricsCache();
+    }));
+    if (!applied) {
+      if (trackKey === state.trackKey) showToast(state.lyricMessage || "歌词选择未完成", 4_000);
+      return;
+    }
     elements.candidateBrowser.replaceChildren();
     elements.candidateBrowser.classList.remove("is-visible");
     renderLyricWindow(findActiveLine(state.lines, estimatedPosition() - state.lyricOffsetMs));
     showToast(`已改用 ${candidate.title} · ${candidate.artist}`);
   } catch (error) {
     showToast(String(error).replace(/^.*?: /, ""), 4_000);
+  } finally {
     button.disabled = false;
   }
 }
@@ -1206,6 +1401,7 @@ document.querySelector("#find-version-button").addEventListener("click", async (
     return;
   }
   const button = event.currentTarget;
+  const trackKey = state.trackKey;
   button.disabled = true;
   button.textContent = "搜索中…";
   elements.candidateBrowser.classList.add("is-visible");
@@ -1217,6 +1413,7 @@ document.querySelector("#find-version-button").addEventListener("click", async (
       album: state.album,
       durationMs: state.durationMs,
     });
+    if (trackKey !== state.trackKey) return;
     elements.candidateBrowser.replaceChildren();
     if (!candidates.length) {
       elements.candidateBrowser.textContent = "没有找到其他可用版本";
@@ -1237,11 +1434,11 @@ document.querySelector("#find-version-button").addEventListener("click", async (
       provider.textContent = candidate.provider === "netease" ? "网易云" : "QQ 音乐";
       copy.append(title, detail);
       item.append(copy, provider);
-      item.addEventListener("click", () => chooseLyricsCandidate(candidate, item));
+      item.addEventListener("click", () => chooseLyricsCandidate(candidate, item, trackKey));
       elements.candidateBrowser.append(item);
     }
   } catch {
-    elements.candidateBrowser.textContent = "搜索失败，请检查网络后重试";
+    if (trackKey === state.trackKey) elements.candidateBrowser.textContent = "搜索失败，请检查网络后重试";
   } finally {
     button.disabled = false;
     button.textContent = "手动选择";
@@ -1252,6 +1449,53 @@ document.querySelector("#cache-clear-button").addEventListener("click", () => {
   saveLyricsCache();
   showToast("歌词缓存已清空");
 });
+
+document.querySelector("#song-link-button").addEventListener("click", async (event) => {
+  if (!state.trackKey) { showToast("播放歌曲后才能绑定歌词"); return; }
+  const button = event.currentTarget;
+  const key = state.trackKey;
+  try {
+    const candidate = parseSongLink(document.querySelector("#song-link-input").value);
+    const title = state.title;
+    const artist = state.artist;
+    button.disabled = true;
+    button.textContent = "获取中…";
+    const applied = await lyricSession.bind(() => invoke("fetch_lyrics_candidate", { ...candidate, title, artist }));
+    if (key === state.trackKey) showToast(applied ? "指定歌词已绑定到当前歌曲" : state.lyricMessage || "未能获取指定歌词", 4_000);
+  } catch (error) { showToast(error.message, 4_000); }
+  finally { button.disabled = false; button.textContent = "获取并绑定"; }
+});
+
+let lyricImportTrackKey = "";
+document.querySelector("#lyric-import-button").addEventListener("click", () => {
+  if (!state.trackKey) { showToast("播放歌曲后才能导入并绑定歌词"); return; }
+  lyricImportTrackKey = state.trackKey;
+  document.querySelector("#lyric-file-input").click();
+});
+document.querySelector("#lyric-file-input").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file || !state.trackKey) return;
+  if (lyricImportTrackKey !== state.trackKey) { showToast("歌曲已经切换，请为当前歌曲重新选择歌词文件"); return; }
+  const key = state.trackKey;
+  const title = state.title;
+  const artist = state.artist;
+  const applied = await lyricSession.bind(async () => ({
+    lrc: await readLyricFile(file), songMid: `local:${file.name}`, matchedTitle: title, matchedArtist: artist,
+  }));
+  if (key === state.trackKey) showToast(applied ? "歌词文件已绑定到当前歌曲" : state.lyricMessage || "歌词导入失败", 4_000);
+});
+document.querySelector("#lyric-auto-button").addEventListener("click", () => {
+  if (!state.trackKey) return;
+  delete state.lyricCache[state.trackKey];
+  for (const key of matchingLegacyKeys(state.lyricCache, {
+    source: state.source, title: state.title, artist: state.artist, album: state.album, durationMs: state.durationMs,
+  })) delete state.lyricCache[key];
+  saveLyricsCache();
+  lyricSession.retry();
+  showToast("正在重新自动匹配当前歌曲");
+});
+window.addEventListener("online", () => { if (state.lyricStatus === "error") lyricSession.retry(); });
 
 elements.autostart.addEventListener("change", async () => {
   if (!IS_TAURI) return;
@@ -1444,6 +1688,7 @@ async function handleShortcut(action) {
   else if (action === "lyricsLater") adjustLyricOffset(500);
   else if (action === "resync") {
     pollMedia();
+    if (state.lyricStatus === "error") lyricSession.retry();
     showToast("播放器进度已重新读取");
   } else if (action === "switchPlayer") cyclePlayer();
 }
@@ -1497,6 +1742,8 @@ if (IS_TAURI) {
   state.lines = parseLrc(PREVIEW_LRC);
   state.lyricStatus = "ready";
   state.trackKey = "preview";
+  lyricSession.update({ ...state, source: "preview", trackId: "" });
+  await lyricSession.bind(async () => ({ lrc: PREVIEW_LRC, songMid: "preview", matchedTitle: state.title, matchedArtist: state.artist }));
   updateConnectionUi();
 }
 
@@ -1504,5 +1751,7 @@ loadSystemFonts();
 applyDisplaySettings({ rerender: false });
 syncShortcutInputs();
 syncTrackTools();
+refreshDisplayProfiles();
+setSettingsOpen(false);
 renderLyricWindow(-1);
 requestAnimationFrame(animationFrame);

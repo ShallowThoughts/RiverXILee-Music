@@ -930,6 +930,14 @@ button {
   white-space: nowrap;
 }
 
+#update-detail {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .update-copy .update-progress {
   display: block;
   width: 100%;

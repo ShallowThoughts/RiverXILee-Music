@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
@@ -26,9 +24,9 @@ use windows::Media::Control::{
 use windows::Media::MediaPlaybackType;
 mod fonts;
 mod netease;
+mod updater;
 
 static MEDIA_MANAGER: OnceLock<GlobalSystemMediaTransportControlsSessionManager> = OnceLock::new();
-static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static LYRICS_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static SHORTCUT_ACTIONS: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
 
@@ -180,6 +178,7 @@ struct UpdateDownloadProgress {
     total_bytes: u64,
     percent: u8,
     status: String,
+    attempt: u8,
 }
 
 #[derive(Serialize)]
@@ -967,24 +966,7 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 #[tauri::command]
 async fn check_for_update() -> Result<UpdateInfo, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let client = HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(12))
-            .user_agent(concat!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) RiverXILeeDesktopLyrics/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("HTTP client should initialize")
-    });
-    let release: Value = client
-        .get("https://api.github.com/repos/ShallowThoughts/RiverXILee-Music/releases/latest")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(error_text)?
-        .error_for_status()
-        .map_err(error_text)?
-        .json()
-        .await
-        .map_err(error_text)?;
+    let release = updater::fetch_release().await?;
     let latest_version = release["tag_name"]
         .as_str()
         .unwrap_or_default()
@@ -1034,72 +1016,9 @@ async fn download_update(app: AppHandle, expected_version: String) -> Result<Str
         return Err("版本信息已经变化，请重新检查更新".to_string());
     }
 
-    let response = HTTP_CLIENT
-        .get_or_init(reqwest::Client::new)
-        .get(&update.download_url)
-        .send()
-        .await
-        .map_err(error_text)?
-        .error_for_status()
-        .map_err(error_text)?;
-    let total_bytes = response.content_length().unwrap_or(update.download_size);
-    let file_name = format!(
-        "RiverXILee-Desktop-Lyrics_{}_x64-setup.exe",
-        update.latest_version
-    );
-    let installer_path = std::env::temp_dir().join(file_name);
-    let mut installer = fs::File::create(&installer_path).map_err(error_text)?;
-    let mut stream = response.bytes_stream();
-    let mut hasher = Sha256::new();
-    let mut downloaded_bytes = 0_u64;
-
-    use futures_lite::StreamExt;
-    let download_result = async {
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(error_text)?;
-            installer.write_all(&chunk).map_err(error_text)?;
-            hasher.update(&chunk);
-            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
-            let percent = if total_bytes > 0 {
-                ((downloaded_bytes.saturating_mul(100) / total_bytes).min(100)) as u8
-            } else {
-                0
-            };
-            let _ = app.emit(
-                "update-download-progress",
-                UpdateDownloadProgress {
-                    downloaded_bytes,
-                    total_bytes,
-                    percent,
-                    status: "downloading".to_string(),
-                },
-            );
-        }
-        installer.flush().map_err(error_text)
-    }
-    .await;
-    if let Err(error) = download_result {
-        drop(installer);
-        let _ = fs::remove_file(&installer_path);
-        return Err(error);
-    }
-    drop(installer);
-
-    let actual_sha256 = format!("{:x}", hasher.finalize());
-    if actual_sha256 != update.sha256 {
-        let _ = fs::remove_file(&installer_path);
-        return Err("更新包校验失败，文件已安全删除".to_string());
-    }
-    let _ = app.emit(
-        "update-download-progress",
-        UpdateDownloadProgress {
-            downloaded_bytes,
-            total_bytes,
-            percent: 100,
-            status: "verified".to_string(),
-        },
-    );
-    Ok(installer_path.to_string_lossy().into_owned())
+    updater::download_verified(&update, |progress| {
+        let _ = app.emit("update-download-progress", progress);
+    }).await
 }
 
 #[tauri::command]

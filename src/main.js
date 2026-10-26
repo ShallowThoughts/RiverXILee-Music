@@ -10,6 +10,7 @@ import { createLyricSession, legacyTrackKey, matchingLegacyKeys } from "./lyric-
 import { parseSongLink, readLyricFile } from "./lyric-links.js";
 import { createFontPicker, resolveInstalledFont } from "./font-picker.js";
 import { playbackAnchor, playbackPosition, reconcilePlaybackAnchor } from "./playback.js";
+import { updateErrorMessage, updateProgressView } from "./update-ui.js";
 import {
   DEFAULT_SHORTCUTS,
   SHORTCUT_ACTIONS,
@@ -532,6 +533,10 @@ function setUpdateBannerVisible(visible) {
 
 async function checkForUpdates({ manual = false } = {}) {
   if (!IS_TAURI || updateCheckInFlight) return;
+  if (updateDownloadInFlight || downloadedInstallerPath) {
+    if (manual) showToast(downloadedInstallerPath ? "更新包已准备好，请点击立即安装" : "更新正在下载，请稍候");
+    return;
+  }
   updateCheckInFlight = true;
   try {
     const update = await invoke("check_for_update");
@@ -549,8 +554,8 @@ async function checkForUpdates({ manual = false } = {}) {
     } else if (manual) {
       showToast(`当前已是最新版 v${update.currentVersion}`);
     }
-  } catch {
-    if (manual) showToast("暂时无法检查更新，请稍后重试");
+  } catch (error) {
+    if (manual) showToast(updateErrorMessage(error, "暂时无法检查更新，请稍后重试"), 5_000);
   } finally {
     updateCheckInFlight = false;
   }
@@ -1629,8 +1634,9 @@ elements.updateDownload.addEventListener("click", async () => {
 
   updateDownloadInFlight = true;
   elements.updateDownload.disabled = true;
-  elements.updateDownload.textContent = "下载中 0%";
-  elements.updateDetail.textContent = "正在下载更新包，请保持网络连接";
+  elements.updateTitle.textContent = `下载 v${availableUpdate.latestVersion}`;
+  elements.updateDownload.textContent = "正在连接…";
+  elements.updateDetail.textContent = "正在确认版本并连接下载服务器";
   elements.updateProgress.setAttribute("aria-hidden", "false");
   try {
     downloadedInstallerPath = await invoke("download_update", {
@@ -1640,7 +1646,9 @@ elements.updateDownload.addEventListener("click", async () => {
     elements.updateDetail.textContent = "SHA-256 校验通过 · 点击后覆盖安装并保留配置";
     elements.updateDownload.textContent = "立即安装";
   } catch (error) {
-    elements.updateDetail.textContent = String(error).replace(/^.*?: /, "");
+    elements.updateTitle.textContent = "更新未完成";
+    elements.updateDetail.textContent = updateErrorMessage(error);
+    elements.updateDetail.title = elements.updateDetail.textContent;
     elements.updateDownload.textContent = "重新下载";
     elements.updateProgress.style.setProperty("--update-progress", "0");
   } finally {
@@ -1705,20 +1713,12 @@ document.querySelector("#close-button").addEventListener("click", () => {
 if (IS_TAURI) {
   listen("global-shortcut", (event) => handleShortcut(event.payload));
   listen("update-download-progress", (event) => {
-    const progress = event.payload;
-    const percent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
-    elements.updateProgress.style.setProperty("--update-progress", String(percent / 100));
-    if (progress.status === "verified") {
-      elements.updateDownload.textContent = "正在校验…";
-      elements.updateDetail.textContent = "下载完成，正在验证安装包完整性";
-    } else {
-      elements.updateDownload.textContent = `下载中 ${percent}%`;
-      const downloaded = (Number(progress.downloadedBytes) / 1024 / 1024).toFixed(1);
-      const total = Number(progress.totalBytes) > 0
-        ? (Number(progress.totalBytes) / 1024 / 1024).toFixed(1)
-        : "--";
-      elements.updateDetail.textContent = `${downloaded} / ${total} MB · 下载完成后自动校验`;
-    }
+    if (!updateDownloadInFlight) return;
+    const view = updateProgressView(event.payload);
+    elements.updateProgress.style.setProperty("--update-progress", String(view.percent / 100));
+    elements.updateDownload.textContent = view.button;
+    elements.updateDetail.textContent = view.detail;
+    elements.updateDetail.title = view.detail;
   });
   listen("single-instance-activated", () => {
     state.visible = true;

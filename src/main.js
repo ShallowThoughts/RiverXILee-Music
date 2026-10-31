@@ -11,6 +11,7 @@ import { parseSongLink, readLyricFile } from "./lyric-links.js";
 import { createFontPicker, resolveInstalledFont } from "./font-picker.js";
 import { playbackAnchor, playbackPosition, reconcilePlaybackAnchor } from "./playback.js";
 import { updateErrorMessage, updateProgressView } from "./update-ui.js";
+import { platformName, resolvePreferredSource } from "./media-sources.js";
 import {
   DEFAULT_SHORTCUTS,
   SHORTCUT_ACTIONS,
@@ -35,7 +36,7 @@ import {
 import "./styles.css";
 
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
-const APP_VERSION = "1.1.3";
+const APP_VERSION = "1.1.4";
 const DISPLAY_SETTINGS_KEY = "riverxilee-desktop-lyrics.display.v1";
 const SHORTCUTS_KEY = "riverxilee-desktop-lyrics.shortcuts.v1";
 const PLAYER_KEY = "riverxilee-desktop-lyrics.player.v1";
@@ -651,18 +652,6 @@ function showToast(message, timeout = 2_600) {
   showToast.timer = setTimeout(() => elements.toast.classList.remove("visible"), timeout);
 }
 
-function platformName(source) {
-  const value = source.toLowerCase();
-  if (value.includes("cloudmusic")) return "网易云音乐";
-  if (value.includes("qqmusic")) return "QQ 音乐";
-  if (value.includes("kugou")) return "酷狗音乐";
-  if (value.includes("kuwo")) return "酷我音乐";
-  if (value.includes("qishui")) return "汽水音乐";
-  if (value.includes("spotify")) return "Spotify";
-  if (value.includes("applemusic") || value.includes("itunes")) return "Apple Music";
-  return source || "未知播放器";
-}
-
 function syncTrackTools() {
   const offsetSeconds = state.lyricOffsetMs / 1_000;
   elements.offsetStatus.textContent = `${offsetSeconds > 0 ? "+" : ""}${offsetSeconds.toFixed(1)} 秒`;
@@ -763,6 +752,12 @@ async function refreshMediaSources() {
   if (!IS_TAURI) return;
   try {
     state.availableSources = await invoke("list_media_sessions");
+    const preferred = resolvePreferredSource(state.preferredSource, state.availableSources);
+    if (preferred !== state.preferredSource) {
+      state.preferredSource = preferred;
+      localStorage.setItem(PLAYER_KEY, preferred);
+      persistNativePreferences();
+    }
     const previous = elements.playerSource.value;
     elements.playerSource.replaceChildren(new Option("自动选择正在播放的平台", ""));
     for (const session of state.availableSources) {

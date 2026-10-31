@@ -1,11 +1,5 @@
 import { parseLrc } from "./lyrics.js";
-
-function sourceKey(source = "") {
-  const value = source.trim().toLowerCase();
-  if (value.includes("cloudmusic")) return "cloudmusic";
-  if (value.includes("qqmusic")) return "qqmusic";
-  return value;
-}
+import { musicSourceKey as sourceKey } from "./media-sources.js";
 
 // IDs and durations can arrive after the title, or fluctuate between media readers.
 export function lyricTrackKey(track) {
@@ -19,6 +13,12 @@ export function legacyTrackKey(track) {
 
 export function matchingLegacyKeys(store, track) {
   return Object.keys(store).filter((oldKey) => {
+    // Earlier v2 entries used the raw Qishui/SodaMusic identifier.
+    if (oldKey.startsWith("v2\0")) {
+      const [, source, title, artist, album] = oldKey.split("\0");
+      return sourceKey(source) === sourceKey(track.source) && title === track.title
+        && artist === track.artist && album === track.album;
+    }
     const [source, id, title, artist, album, duration] = oldKey.split("\0");
     return !oldKey.startsWith("v2\0") && sourceKey(source) === sourceKey(track.source)
       && title === track.title && artist === track.artist && album === track.album

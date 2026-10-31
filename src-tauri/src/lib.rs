@@ -23,6 +23,7 @@ use windows::Media::Control::{
 };
 use windows::Media::MediaPlaybackType;
 mod fonts;
+mod lyric_lookup;
 mod netease;
 mod updater;
 
@@ -268,6 +269,15 @@ fn session_activity_rank(
     (updated_at, is_current)
 }
 
+fn source_is_qishui(source: &str) -> bool {
+    let source = source.to_ascii_lowercase();
+    source.contains("qishui") || source.contains("sodamusic") || source.contains("汽水音乐")
+}
+
+fn preferred_source_matches(source: &str, preferred: &str) -> bool {
+    source.eq_ignore_ascii_case(preferred) || (source_is_qishui(source) && source_is_qishui(preferred))
+}
+
 fn source_is_supported_music_app(source: &str) -> bool {
     const MUSIC_APP_MARKERS: [&str; 21] = [
         "qqmusic",
@@ -293,7 +303,7 @@ fn source_is_supported_music_app(source: &str) -> bool {
         "musicbee",
     ];
     let source = source.to_ascii_lowercase();
-    MUSIC_APP_MARKERS
+    source_is_qishui(&source) || MUSIC_APP_MARKERS
         .iter()
         .any(|marker| source.contains(marker))
 }
@@ -336,7 +346,7 @@ async fn active_media_session(
                 .SourceAppUserModelId()
                 .map(|value| value.to_string().to_ascii_lowercase())
                 .unwrap_or_default();
-            if source == wanted && session_is_music_candidate(&session) {
+            if preferred_source_matches(&source, &wanted) && session_is_music_candidate(&session) {
                 return Ok(Some(session));
             }
         }
@@ -695,8 +705,36 @@ fn netease_candidate_score(candidate: &Value, title: &str, artist: &str, duratio
     score
 }
 
-async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Option<String> {
-    let response = client
+async fn search_netease_songs(client: &reqwest::Client, query: &str, limit: &str) -> Result<Vec<Value>, String> {
+    let search = lyric_lookup::json(client
+        .get("https://music.163.com/api/search/get/web")
+        .header("Referer", "https://music.163.com/")
+        .query(&[("s", query), ("type", "1"), ("limit", limit), ("offset", "0")]), "网易云音乐").await?;
+    if let Some(songs) = search["result"]["songs"].as_array() {
+        Ok(songs.clone())
+    } else if search["result"]["songCount"].as_i64() == Some(0) {
+        Ok(Vec::new())
+    } else {
+        Err("网易云音乐搜索响应异常，请稍后重试或指定歌词".to_string())
+    }
+}
+
+async fn search_qq_songs(client: &reqwest::Client, query: &str) -> Result<Vec<Value>, String> {
+    let search = lyric_lookup::json(client
+        .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
+        .header("Referer", "https://y.qq.com/")
+        .query(&[("p", "1"), ("n", "12"), ("w", query), ("format", "json")]), "QQ 音乐").await?;
+    if let Some(songs) = search["data"]["song"]["list"].as_array() {
+        Ok(songs.clone())
+    } else if search["data"]["song"]["totalnum"].as_i64() == Some(0) {
+        Ok(Vec::new())
+    } else {
+        Err("QQ 音乐搜索响应异常，请稍后重试或指定歌词".to_string())
+    }
+}
+
+async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Result<Option<String>, String> {
+    let native = lyric_lookup::json(client
         .get("https://music.163.com/api/song/lyric")
         .header("Referer", "https://music.163.com/")
         .query(&[
@@ -706,18 +744,9 @@ async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Option<S
             ("tv", "-1"),
             ("yv", "-1"),
             ("os", "pc"),
-        ])
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?;
-    let native = response.json::<Value>().await.ok()?;
-    native["yrc"]["lyric"]
-        .as_str()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| native["lrc"]["lyric"].as_str().filter(|value| !value.trim().is_empty()))
-        .map(str::to_string)
+        ]), "网易云音乐").await?;
+    Ok(["yrc", "lrc"].iter().find_map(|kind| native[*kind]["lyric"].as_str()
+        .filter(|value| lyric_lookup::has_timed_text(value)).map(str::to_string)))
 }
 
 async fn fetch_netease_lyrics(
@@ -726,44 +755,23 @@ async fn fetch_netease_lyrics(
     artist: &str,
     duration_ms: i64,
     track_id: &str,
-) -> Option<LyricsResult> {
+) -> Result<Option<LyricsResult>, String> {
     if !track_id.is_empty()
         && track_id.chars().all(|character| character.is_ascii_digit())
-        && let Some(lrc) = fetch_netease_lrc(client, track_id).await
+        && let Some(lrc) = fetch_netease_lrc(client, track_id).await?
     {
-        return Some(LyricsResult {
+        return Ok(Some(LyricsResult {
             lrc,
             song_mid: format!("netease:{track_id}"),
             matched_title: title.to_string(),
             matched_artist: artist.to_string(),
-        });
+        }));
     }
 
     let mut tried_ids = HashSet::new();
     tried_ids.insert(track_id.to_string());
     for query in lyric_search_queries(title, artist) {
-        let Some(search) = client
-            .get("https://music.163.com/api/search/get/web")
-            .header("Referer", "https://music.163.com/")
-            .query(&[
-                ("s", query.as_str()),
-                ("type", "1"),
-                ("limit", "10"),
-                ("offset", "0"),
-            ])
-            .send()
-            .await
-            .ok()
-            .and_then(|response| response.error_for_status().ok())
-        else {
-            continue;
-        };
-        let Ok(search) = search.json::<Value>().await else {
-            continue;
-        };
-        let Some(candidates) = search["result"]["songs"].as_array() else {
-            continue;
-        };
+        let candidates = search_netease_songs(client, &query, "10").await?;
         let mut ranked = candidates
             .iter()
             .map(|item| {
@@ -783,17 +791,17 @@ async fn fetch_netease_lyrics(
             if !tried_ids.insert(candidate_id.clone()) {
                 continue;
             }
-            if let Some(lrc) = fetch_netease_lrc(client, &candidate_id).await {
-                return Some(LyricsResult {
+            if let Some(lrc) = fetch_netease_lrc(client, &candidate_id).await? {
+                return Ok(Some(LyricsResult {
                     lrc,
                     song_mid: format!("netease:{candidate_id}"),
                     matched_title: candidate["name"].as_str().unwrap_or(title).to_string(),
                     matched_artist: netease_artist(candidate),
-                });
+                }));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 fn decode_entities(value: &str) -> String {
@@ -806,8 +814,8 @@ fn decode_entities(value: &str) -> String {
         .replace("&amp;", "&")
 }
 
-async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Option<String> {
-    let response = client
+async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Result<Option<String>, String> {
+    let lyric = lyric_lookup::json(client
         .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
         .header("Referer", "https://y.qq.com/")
         .query(&[
@@ -815,17 +823,12 @@ async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Option<String
             ("format", "json"),
             ("nobase64", "1"),
             ("g_tk", "5381"),
-        ])
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?;
-    let lyric = response.json::<Value>().await.ok()?;
-    lyric["lyric"]
+        ]), "QQ 音乐").await?;
+    Ok(lyric["lyric"]
         .as_str()
         .filter(|value| !value.trim().is_empty())
         .map(decode_entities)
+        .filter(|value| lyric_lookup::has_timed_text(value)))
 }
 
 fn lyrics_http_client() -> &'static reqwest::Client {
@@ -849,18 +852,11 @@ async fn search_lyrics_candidates(
         return Err("当前歌曲没有可用于搜索的标题".to_string());
     }
     let client = lyrics_http_client();
-    let mut results = Vec::new();
-    let mut seen = HashSet::new();
-
-    for query in lyric_search_queries(&title, &artist).into_iter().take(2) {
-        if let Some(response) = client
-            .get("https://music.163.com/api/search/get/web")
-            .header("Referer", "https://music.163.com/")
-            .query(&[("s", query.as_str()), ("type", "1"), ("limit", "12"), ("offset", "0")])
-            .send().await.ok().and_then(|response| response.error_for_status().ok())
-            && let Ok(search) = response.json::<Value>().await
-            && let Some(candidates) = search["result"]["songs"].as_array()
-        {
+    let netease = async {
+        let mut results = Vec::new();
+        let mut seen = HashSet::new();
+        for query in lyric_search_queries(&title, &artist).into_iter().take(2) {
+            let candidates = search_netease_songs(client, &query, "12").await?;
             for item in candidates {
                 let Some(id) = item["id"].as_i64().map(|id| id.to_string()) else { continue };
                 if !seen.insert(format!("netease:{id}")) { continue; }
@@ -868,22 +864,20 @@ async fn search_lyrics_candidates(
                     provider: "netease".to_string(),
                     id,
                     title: item["name"].as_str().unwrap_or_default().to_string(),
-                    artist: netease_artist(item),
+                    artist: netease_artist(&item),
                     album: item["album"]["name"].as_str().unwrap_or_default().to_string(),
                     duration_ms: item["duration"].as_i64().unwrap_or_default(),
-                    score: netease_candidate_score(item, &title, &artist, duration_ms).max(0),
+                    score: netease_candidate_score(&item, &title, &artist, duration_ms).max(0),
                 });
             }
         }
-
-        if let Some(response) = client
-            .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
-            .header("Referer", "https://y.qq.com/")
-            .query(&[("p", "1"), ("n", "12"), ("w", query.as_str()), ("format", "json")])
-            .send().await.ok().and_then(|response| response.error_for_status().ok())
-            && let Ok(search) = response.json::<Value>().await
-            && let Some(candidates) = search["data"]["song"]["list"].as_array()
-        {
+        Ok::<_, String>(results)
+    };
+    let qq = async {
+        let mut results = Vec::new();
+        let mut seen = HashSet::new();
+        for query in lyric_search_queries(&title, &artist).into_iter().take(2) {
+            let candidates = search_qq_songs(client, &query).await?;
             for item in candidates {
                 let Some(id) = item["songmid"].as_str().filter(|id| !id.is_empty()) else { continue };
                 if !seen.insert(format!("qq:{id}")) { continue; }
@@ -897,10 +891,26 @@ async fn search_lyrics_candidates(
                     artist: item_artist,
                     album: item["albumname"].as_str().unwrap_or_default().to_string(),
                     duration_ms: item["interval"].as_i64().unwrap_or_default() * 1_000,
-                    score: candidate_score(item, &title, &artist, &album, duration_ms).max(0),
+                    score: candidate_score(&item, &title, &artist, &album, duration_ms).max(0),
                 });
             }
         }
+        Ok::<_, String>(results)
+    };
+    let (netease, qq) = futures_lite::future::zip(
+        lyric_lookup::bounded("网易云音乐", netease),
+        lyric_lookup::bounded("QQ 音乐", qq),
+    ).await;
+    let mut results = Vec::new();
+    let mut last_error = None;
+    for result in [netease, qq] {
+        match result {
+            Ok(mut candidates) => results.append(&mut candidates),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if results.is_empty() && let Some(error) = last_error {
+        return Err(error);
     }
     results.sort_by_key(|candidate| std::cmp::Reverse(candidate.score));
     results.truncate(20);
@@ -924,6 +934,7 @@ async fn fetch_lyrics_candidate(
         "qq" => fetch_qq_lrc(client, &id).await,
         _ => return Err("不支持的歌词来源".to_string()),
     }
+    ?
     .ok_or_else(|| "这个版本没有可用的时间轴歌词".to_string())?;
     Ok(LyricsResult {
         lrc,
@@ -1067,41 +1078,34 @@ async fn fetch_lyrics_inner(
         return Err("当前播放器暂未提供歌曲名称".to_string());
     }
     let client = lyrics_http_client();
-    if source.to_ascii_lowercase().contains("cloudmusic")
-        && let Some(result) =
-            fetch_netease_lyrics(client, &title, &artist, duration_ms, &track_id).await
-    {
-        return Ok(result);
+    let is_netease = source.to_ascii_lowercase().contains("cloudmusic");
+    // Prefer an exact native ID, but do not let a stalled native endpoint consume
+    // the whole lookup deadline or block the other catalog.
+    if is_netease && !track_id.is_empty() && track_id.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(Ok(Some(lrc))) = tokio::time::timeout(Duration::from_secs(3), fetch_netease_lrc(client, &track_id)).await {
+            return Ok(LyricsResult { lrc, song_mid: format!("netease:{track_id}"), matched_title: title, matched_artist: artist });
+        }
     }
+    let netease = lyric_lookup::bounded("网易云音乐", fetch_netease_lyrics(client, &title, &artist, duration_ms, ""));
+    let qq = lyric_lookup::bounded("QQ 音乐", fetch_qq_lyrics(client, &title, &artist, &album, duration_ms));
+    if is_netease {
+        lyric_lookup::first_available(netease, qq).await
+    } else {
+        lyric_lookup::first_available(qq, netease).await
+    }
+}
+
+async fn fetch_qq_lyrics(
+    client: &reqwest::Client, title: &str, artist: &str, album: &str, duration_ms: i64,
+) -> Result<Option<LyricsResult>, String> {
     let mut tried_song_mids = HashSet::new();
-    for query in lyric_search_queries(&title, &artist) {
-        let Some(response) = client
-            .get("https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
-            .header("Referer", "https://y.qq.com/")
-            .query(&[
-                ("p", "1"),
-                ("n", "12"),
-                ("w", query.as_str()),
-                ("format", "json"),
-            ])
-            .send()
-            .await
-            .ok()
-            .and_then(|response| response.error_for_status().ok())
-        else {
-            continue;
-        };
-        let Ok(search) = response.json::<Value>().await else {
-            continue;
-        };
-        let Some(candidates) = search["data"]["song"]["list"].as_array() else {
-            continue;
-        };
+    for query in lyric_search_queries(title, artist) {
+        let candidates = search_qq_songs(client, &query).await?;
         let mut ranked = candidates
             .iter()
             .map(|item| {
                 (
-                    candidate_score(item, &title, &artist, &album, duration_ms),
+                    candidate_score(item, title, artist, album, duration_ms),
                     item,
                 )
             })
@@ -1119,7 +1123,7 @@ async fn fetch_lyrics_inner(
             if !tried_song_mids.insert(song_mid.to_string()) {
                 continue;
             }
-            let Some(lrc) = fetch_qq_lrc(client, song_mid).await else { continue };
+            let Some(lrc) = fetch_qq_lrc(client, song_mid).await? else { continue };
             let matched_artist = candidate["singer"]
                 .as_array()
                 .map(|singers| {
@@ -1131,15 +1135,15 @@ async fn fetch_lyrics_inner(
                 })
                 .unwrap_or_default();
 
-            return Ok(LyricsResult {
+            return Ok(Some(LyricsResult {
                 lrc,
                 song_mid: song_mid.to_string(),
-                matched_title: candidate["songname"].as_str().unwrap_or(&title).to_string(),
+                matched_title: candidate["songname"].as_str().unwrap_or(title).to_string(),
                 matched_artist,
-            });
+            }));
         }
     }
-    Err("没有找到版本匹配且可用的歌词".to_string())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1265,11 +1269,13 @@ mod tests {
                 assert!(
                     super::fetch_netease_lrc(&client, expected_id)
                         .await
+                        .expect("NetEase lyric request should succeed")
                         .is_some(),
                     "direct lyric lookup failed for {expected_id}"
                 );
                 let result = super::fetch_netease_lyrics(&client, title, artist, duration_ms, "")
                     .await
+                    .expect("NetEase search request should succeed")
                     .unwrap_or_else(|| panic!("failed to resolve {title} - {artist}"));
                 assert_eq!(result.song_mid, format!("netease:{expected_id}"));
                 assert!(!result.lrc.trim().is_empty());
@@ -1314,16 +1320,16 @@ mod tests {
 
         tauri::async_runtime::block_on(async {
             for (title, artist, album, duration_ms, expected_mid) in songs {
-                let result = super::fetch_lyrics(
-                    title.to_string(),
-                    artist.to_string(),
-                    album.to_string(),
+                let result = super::fetch_qq_lyrics(
+                    super::lyrics_http_client(),
+                    title,
+                    artist,
+                    album,
                     duration_ms,
-                    "QQMusic.exe".to_string(),
-                    String::new(),
                 )
                 .await
-                .unwrap_or_else(|error| panic!("failed to resolve {title} - {artist}: {error}"));
+                .unwrap_or_else(|error| panic!("failed to resolve {title} - {artist}: {error}"))
+                .expect("a matching QQ Music lyric should be present");
                 assert_eq!(result.song_mid, expected_mid);
                 assert!(!result.lrc.trim().is_empty());
             }
@@ -1407,6 +1413,35 @@ mod tests {
         assert!(!source_is_supported_music_app("chrome.exe"));
         assert!(!source_is_supported_music_app("msedge.exe"));
         assert!(!source_is_supported_music_app("UnknownPlayer.exe"));
+        assert!(!source_is_supported_music_app("SodaPDF.exe"));
+        assert!(!source_is_supported_music_app("soda-video.exe"));
+    }
+
+    #[test]
+    fn accepts_sodamusic_and_preserves_an_existing_qishui_player_lock() {
+        for source in ["SodaMusic.exe", "SODAMUSIC.EXE", "ByteDance.SodaMusic_123!App", "QishuiMusic.exe", "汽水音乐.exe"] {
+            assert!(source_is_supported_music_app(source), "{source}");
+            assert!(super::preferred_source_matches(source, "QishuiMusic.exe"));
+        }
+        assert!(!super::preferred_source_matches("QQMusic.exe", "QishuiMusic.exe"));
+        assert!(!super::preferred_source_matches("soda-video.exe", "QishuiMusic.exe"));
+    }
+
+    #[test]
+    #[ignore = "live automatic lyric lookup with SodaMusic metadata, not a running-client test"]
+    fn resolves_lyrics_from_sodamusic_song_metadata() {
+        tauri::async_runtime::block_on(async {
+            for (title, artist, album, duration) in [
+                ("坏天气", "贾格JuggShots", "", 153675),
+                ("Supernova", "aespa", "Supernova", 178000),
+                ("APT.", "ROSÉ & Bruno Mars", "APT.", 169000),
+            ] {
+                let result = super::fetch_lyrics(title.into(), artist.into(), album.into(), duration, "SodaMusic.exe".into(), String::new()).await
+                    .unwrap_or_else(|error| panic!("SodaMusic metadata lookup failed for {title}: {error}"));
+                assert!(super::lyric_lookup::has_timed_text(&result.lrc));
+                println!("SodaMusic metadata lookup: {title}, provider id {}, timed lyric bytes {}", result.song_mid, result.lrc.len());
+            }
+        });
     }
 
     #[test]

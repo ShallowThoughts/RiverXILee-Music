@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$releaseVersion = "1.1.3"
+$releaseVersion = "1.1.4"
 $payloadDirectory = Join-Path $projectRoot "src-tauri\target\release\bundle\nsis"
 $installerManifest = Join-Path $projectRoot "installer-ui\src-tauri\Cargo.toml"
 $installerBinary = Join-Path $projectRoot "installer-ui\src-tauri\target\release\riverxilee-installer-center.exe"

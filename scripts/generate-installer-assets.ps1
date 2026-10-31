@@ -41,7 +41,7 @@ function New-RiverXILeeBitmap {
     $wave.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $wave.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
     if ($Sidebar) {
-        $points = @(
+        [System.Drawing.PointF[]]$points = @(
             [System.Drawing.PointF]::new(17, 189), [System.Drawing.PointF]::new(38, 189),
             [System.Drawing.PointF]::new(48, 174), [System.Drawing.PointF]::new(60, 210),
             [System.Drawing.PointF]::new(73, 158), [System.Drawing.PointF]::new(88, 218),
@@ -50,7 +50,7 @@ function New-RiverXILeeBitmap {
         )
         $graphics.DrawLines($wave, $points)
     } else {
-        $points = @(
+        [System.Drawing.PointF[]]$points = @(
             [System.Drawing.PointF]::new(8, 41), [System.Drawing.PointF]::new(26, 41),
             [System.Drawing.PointF]::new(33, 31), [System.Drawing.PointF]::new(41, 49),
             [System.Drawing.PointF]::new(49, 23), [System.Drawing.PointF]::new(59, 47),
@@ -70,7 +70,7 @@ function New-RiverXILeeBitmap {
         $graphics.DrawString("TRANSPARENT / SYNC", $smallFont, $muted, 17, 87)
         $graphics.DrawString("IMMERSIVE", $smallFont, $muted, 17, 101)
         $graphics.DrawString("Preparing your music space", $smallFont, $muted, 17, 244)
-        $graphics.DrawString("v1.1.3", $smallFont, $white, 17, 267)
+        $graphics.DrawString("v1.1.4", $smallFont, $white, 17, 267)
         $brandFont.Dispose(); $titleFont.Dispose(); $smallFont.Dispose()
     } else {
         $brandFont = [System.Drawing.Font]::new("Segoe UI", 11, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)

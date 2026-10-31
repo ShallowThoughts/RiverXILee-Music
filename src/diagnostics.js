@@ -8,7 +8,7 @@ function formatMilliseconds(milliseconds) {
 export function lyricProvider(match) {
   const id = String(match?.songMid ?? "").toLowerCase();
   if (id.startsWith("netease:")) return "网易云音乐";
-  if (id.startsWith("qq:")) return "QQ 音乐";
+  if (id.startsWith("qq:") || /^[a-z0-9]{8,32}$/i.test(id)) return "QQ 音乐";
   if (id.startsWith("local:")) return "本地歌词文件";
   return match ? "在线匹配" : "尚未匹配";
 }
@@ -28,6 +28,7 @@ export function buildDiagnosticReport(data) {
     `RiverXILee桌面歌词 v${data.version}`,
     `播放器状态：${status}`,
     `当前播放器：${data.source ? data.platformName(data.source) : "无"}`,
+    `媒体会话标识：${data.source || "无"}`,
     `检测到的播放器：${sessions}`,
     `歌曲：${data.title || "未知"}`,
     `歌手：${data.artist || "未知"}`,

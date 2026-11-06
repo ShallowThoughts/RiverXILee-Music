@@ -1,15 +1,22 @@
+param([string]$OutputDirectory)
+
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$releaseVersion = "1.1.4"
+$releaseVersion = (Get-Content -Raw -LiteralPath (Join-Path $projectRoot "package.json") | ConvertFrom-Json).version
 $payloadDirectory = Join-Path $projectRoot "src-tauri\target\release\bundle\nsis"
 $installerManifest = Join-Path $projectRoot "installer-ui\src-tauri\Cargo.toml"
 $installerBinary = Join-Path $projectRoot "installer-ui\src-tauri\target\release\riverxilee-installer-center.exe"
-$releaseDirectory = Join-Path $projectRoot "release\v$releaseVersion"
+$releaseDirectory = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $projectRoot "release\v$releaseVersion" }
 $releaseInstaller = Join-Path $releaseDirectory "RiverXILee-Desktop-Lyrics_${releaseVersion}_x64-setup.exe"
+if ((Test-Path -LiteralPath $releaseDirectory) -and (Get-ChildItem -LiteralPath $releaseDirectory -Force | Select-Object -First 1)) {
+    throw "Release output already exists. Select a new version; published files will not be overwritten."
+}
 
 Push-Location $projectRoot
 try {
+    node scripts/collect-notices.mjs
+    if ($LASTEXITCODE -ne 0) { throw "Third-party notice collection failed" }
     npm run tauri build
     if ($LASTEXITCODE -ne 0) { throw "Desktop lyrics build failed" }
     $payloadPath = Get-ChildItem -LiteralPath $payloadDirectory -File |
@@ -17,6 +24,12 @@ try {
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $payloadPath) {
         throw "Silent installer payload was not generated in $payloadDirectory"
+    }
+    $webManifest = Get-Content -Raw -LiteralPath (Join-Path $projectRoot "dist\asset-manifest.json") | ConvertFrom-Json
+    $nsisScript = Get-Content -Raw -LiteralPath (Join-Path $projectRoot "src-tauri\target\release\nsis\x64\installer.nsi")
+    foreach ($asset in $webManifest.files.PSObject.Properties) {
+        $installedAsset = "resources\web\" + $asset.Name.Replace('/', '\')
+        if (-not $nsisScript.Contains($installedAsset)) { throw "Installer is missing current web resource: $installedAsset" }
     }
 
     cargo build --release --manifest-path $installerManifest
@@ -28,10 +41,14 @@ try {
     New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
     Copy-Item -LiteralPath $installerBinary -Destination $releaseInstaller -Force
 
-    $mainExecutable = Join-Path $projectRoot "src-tauri\target\release\riverxilee-desktop-lyrics.exe"
-    if (Test-Path -LiteralPath $mainExecutable) {
-        Copy-Item -LiteralPath $mainExecutable -Destination (Join-Path $releaseDirectory "RiverXILee-Desktop-Lyrics_${releaseVersion}_x64-portable.exe") -Force
+    & (Join-Path $PSScriptRoot "package-folder.ps1") -OutputDirectory $releaseDirectory -SkipBuild
+    Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $releaseDirectory "LICENSE")
+    Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.txt") -Destination (Join-Path $releaseDirectory "THIRD_PARTY_NOTICES.txt")
+    $checksums = @($releaseInstaller, (Join-Path $releaseDirectory "RiverXILee-Desktop-Lyrics_${releaseVersion}_x64-folder.zip"), (Join-Path $releaseDirectory "LICENSE"), (Join-Path $releaseDirectory "THIRD_PARTY_NOTICES.txt")) | ForEach-Object {
+        $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $([IO.Path]::GetFileName($_))"
     }
+    $checksums | Set-Content -LiteralPath (Join-Path $releaseDirectory "SHA256SUMS.txt") -Encoding ASCII
 
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {

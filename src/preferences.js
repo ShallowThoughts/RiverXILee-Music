@@ -42,13 +42,14 @@ export function shortcutFromKeyboardEvent(event) {
 export function sanitizeShortcuts(value = {}) {
   const result = {};
   for (const action of SHORTCUT_ACTIONS) {
-    result[action] = normalizeShortcut(value[action]) || DEFAULT_SHORTCUTS[action];
+    result[action] = value?.[action] === "" ? "" : normalizeShortcut(value?.[action]) || DEFAULT_SHORTCUTS[action];
   }
   return result;
 }
 
 export function duplicateShortcut(shortcuts, changedAction) {
   const target = shortcuts[changedAction];
+  if (!target) return null;
   return SHORTCUT_ACTIONS.find((action) => action !== changedAction && shortcuts[action] === target) ?? null;
 }
 

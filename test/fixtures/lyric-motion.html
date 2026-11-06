@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>歌词显示层回归</title>
+<link rel="stylesheet" href="/src/styles.css">
+<style>
+  body { background: #11191e; }
+  #surface { display: grid; width: min(980px, 100vw); height: 430px; place-items: center; }
+  #results { margin: 20px; white-space: pre-wrap; font: 14px/1.6 sans-serif; }
+  button { position: fixed; right: 16px; bottom: 16px; padding: 10px; }
+</style>
+<div id="surface"><div id="stack" class="lyrics-stack"></div></div>
+<pre id="results" role="status">等待执行显示层回归</pre>
+<button id="run" type="button">运行显示层回归</button>
+<script type="module">
+  import { createLyricView } from "/src/lyric-view.js";
+  import { parseLrc } from "/src/lyrics.js";
+  import { sanitizeDisplaySettings } from "/src/settings.js";
+  const stack = document.querySelector("#stack");
+  const output = document.querySelector("#results");
+  const view = createLyricView(stack);
+  const lines = parseLrc(Array.from({length: 10}, (_, i) => `{${i * 4000},3600}(${i * 4000},1000,0)透明(${i * 4000 + 1000},1500,0)歌词 ${i}`).join("\n"));
+  const settings = sanitizeDisplaySettings();
+  document.querySelector("#run").addEventListener("click", async () => {
+    const results = [];
+    function check(condition, name) { if (!condition) throw new Error(name); results.push(`通过：${name}`); }
+    try {
+      view.render(lines, 3, settings);
+      const focusY = () => {
+        const row = stack.querySelector(".current-line");
+        const rect = row.getBoundingClientRect();
+        return rect.top + rect.height / 2;
+      };
+      const settle = async () => Promise.allSettled(stack.getAnimations({ subtree: true }).map(a => a.finished));
+      await settle();
+      const anchorY = focusY();
+      const row = stack.querySelector('[data-index="3"]');
+      const text = row.firstElementChild;
+      view.render(lines, 4, settings);
+      check(stack.querySelector('[data-index="3"]') === row && row.firstElementChild === text, "换句保留同一句的节点与字层");
+      view.render(lines, 3, settings);
+      check(stack.querySelectorAll(".current-line").length === 1, "中断后反向换句只有一个当前句");
+      check([...stack.querySelectorAll(".lyric-line")].every(r => r.getAnimations().length <= 1 && r.firstElementChild.getAnimations().length <= 1), "快速换句不累积旧动画");
+      for (let count = 1; count <= 5; count++) {
+        view.render(lines, 3, { ...settings, lineCount: count, motionEffect: "none" });
+        check(stack.querySelectorAll(".lyric-line").length === count, `${count} 行布局数量正确`);
+      }
+      view.render(lines, 3, { ...settings, motionEffect: "none" });
+      view.update(12500, 40000);
+      const word = stack.querySelector(".current-text .karaoke-word");
+      check(word.style.getPropertyValue("--word-progress") === "50.00%", "真实逐字时间决定高亮进度");
+      check(getComputedStyle(word).transform === "none" && stack.getAnimations({ subtree: true }).length === 0, "关闭动效同时关闭逐字与换句位移");
+      view.render(lines, 3, settings, { motion: false });
+      view.update(12500, 40000);
+      const paused = word.getAttribute("style");
+      view.update(12500, 40000);
+      check(word.getAttribute("style") === paused, "暂停时字级动作不继续播放");
+      if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        check(stack.getAnimations({ subtree: true }).length === 0 && getComputedStyle(word).transform === "none", "系统减少动态效果时无空间位移");
+      }
+      view.update(11000, 40000);
+      check(word.dataset.phase === "pending" && getComputedStyle(word.querySelector(".karaoke-word-highlight")).opacity === "0", "回拖到字前不残留颜色");
+      view.render(lines, 8, settings);
+      check(stack.getAnimations({ subtree: true }).length === 0, "大跨度拖动直接定位，不飞越旧句");
+      check(Math.abs(focusY() - anchorY) < 1, "前后拖动后主句焦点保持不动");
+      view.render(lines, 0, settings, { motion: false });
+      check(Math.abs(focusY() - anchorY) < 1 && stack.querySelectorAll(".lyric-line").length === 3, "首句居中，不用未来歌词填补不存在的历史");
+      view.render(lines, 3, { ...settings, motionEffect: "flow" }, { motion: false });
+      view.update(12500, 40000);
+      const turn = stack.querySelector(".current-text .karaoke-word").style.getPropertyValue("--word-turn");
+      check(parseFloat(turn) !== 0 || matchMedia("(prefers-reduced-motion: reduce)").matches, "演出模式包含独立字词旋转");
+      const plain = parseLrc("[00:00.00]A long English line that wraps naturally without losing its font or clipping words\n[00:04.00]한글 가사도 같은 글꼴 흐름으로 표시해\n[00:08.00]中文歌词保持透明与清晰");
+      view.render(plain, 0, { ...settings, lineCount: 3 }, { motion: false });
+      view.update(2000, 12000);
+      check(stack.querySelectorAll(".karaoke-word").length === 0 && stack.querySelector(".current-text").style.getPropertyValue("--karaoke-progress") === "50.00%", "普通 LRC 保留逐句扫色，不伪造逐字时间");
+      check([...stack.querySelectorAll(".lyric-text")].every(el => getComputedStyle(el).fontFamily === getComputedStyle(stack).fontFamily), "上下句与当前句继承相同字体");
+      const lineRects = [...stack.querySelectorAll(".lyric-line")].map(el => el.getBoundingClientRect());
+      check(lineRects.slice(1).every((r, i) => r.top >= lineRects[i].bottom), "多语言换行后各行不重叠");
+      view.clear();
+      view.render(lines, 3, settings, { motion: false });
+      check(stack.querySelector('[data-index="3"]') !== row, "切歌或空状态清除旧歌词节点");
+      output.dataset.result = "passed";
+      output.textContent = `${results.length} 项浏览器回归通过\n${results.join("\n")}`;
+    } catch (error) {
+      output.dataset.result = "failed";
+      output.textContent = `${results.join("\n")}\n失败：${error.message}`;
+    }
+  });
+</script>
+</html>

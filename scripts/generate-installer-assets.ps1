@@ -2,6 +2,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$assetVersion = (Get-Content -Raw -LiteralPath (Join-Path $projectRoot "package.json") | ConvertFrom-Json).version
 $outputDirectory = Join-Path $projectRoot "src-tauri\installer"
 [System.IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
 
@@ -70,7 +71,7 @@ function New-RiverXILeeBitmap {
         $graphics.DrawString("TRANSPARENT / SYNC", $smallFont, $muted, 17, 87)
         $graphics.DrawString("IMMERSIVE", $smallFont, $muted, 17, 101)
         $graphics.DrawString("Preparing your music space", $smallFont, $muted, 17, 244)
-        $graphics.DrawString("v1.1.4", $smallFont, $white, 17, 267)
+        $graphics.DrawString("v$assetVersion", $smallFont, $white, 17, 267)
         $brandFont.Dispose(); $titleFont.Dispose(); $smallFont.Dispose()
     } else {
         $brandFont = [System.Drawing.Font]::new("Segoe UI", 11, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)

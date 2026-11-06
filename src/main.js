@@ -5,7 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
 import { buildDiagnosticReport, lyricProvider, lyricTimingType } from "./diagnostics.js";
-import { findActiveLine, lineProgress, parseLrc, visibleLineIndices, wordProgress } from "./lyrics.js";
+import { findActiveLine, parseLrc } from "./lyrics.js";
+import { createLyricView } from "./lyric-view.js";
 import { createLyricSession, legacyTrackKey, matchingLegacyKeys } from "./lyric-session.js";
 import { parseSongLink, readLyricFile } from "./lyric-links.js";
 import { createFontPicker, resolveInstalledFont } from "./font-picker.js";
@@ -34,9 +35,9 @@ import {
   sanitizeDisplaySettings,
 } from "./settings.js";
 import "./styles.css";
+import { version as APP_VERSION } from "../package.json";
 
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
-const APP_VERSION = "1.1.4";
 const DISPLAY_SETTINGS_KEY = "riverxilee-desktop-lyrics.display.v1";
 const SHORTCUTS_KEY = "riverxilee-desktop-lyrics.shortcuts.v1";
 const PLAYER_KEY = "riverxilee-desktop-lyrics.player.v1";
@@ -44,10 +45,26 @@ const OFFSETS_KEY = "riverxilee-desktop-lyrics.offsets.v1";
 const LYRICS_CACHE_KEY = "riverxilee-desktop-lyrics.cache.v1";
 const DISPLAY_PROFILES_KEY = "riverxilee-desktop-lyrics.profiles.v1";
 const MELODY_KEY = "riverxilee-desktop-lyrics.melody.v1";
-const PREVIEW_LRC = `[00:00.00]RiverXILee桌面歌词
-[00:05.00]让音乐留在画面中央
-[00:10.00]透明 · 安静 · 同步
-[00:15.00]打开任意音乐平台即可自动识别`;
+const PREVIEW_LRC = [
+  "让音乐，留在看得见的地方",
+  "每一句，都有自然的呼吸",
+  "把此刻的旋律，轻轻唱给你",
+  "下一句，沿着时间慢慢靠近",
+  "Let every word follow the music",
+  "지금 이 순간을 기억해",
+  "透明的画面，也能装下情绪",
+  "RiverXILee，陪你听见每一句",
+].map((text, line) => {
+  const characters = text.match(/[A-Za-z]+(?:\s+)?|[^A-Za-z]/g);
+  const unit = 3500 / (characters.length + 2);
+  let time = line * 4000;
+  return `{${time},3600}` + characters.map((character, index) => {
+    const duration = Math.floor(unit * (index === characters.length - 1 ? 3 : 1));
+    const tag = `(${time},${duration},0)${character}`;
+    time += duration;
+    return tag;
+  }).join("");
+}).join("\n");
 const nativePreferences = IS_TAURI
   ? await invoke("load_preferences").catch(() => null)
   : null;
@@ -133,6 +150,20 @@ function persistNativePreferences() {
     .then(() => invoke("save_preferences", { preferences }))
     .catch(() => {});
 }
+
+const settingsPages = [
+  ["layout", "排版与位置", "行数、字号、间距和偏移", "sliders-horizontal"],
+  ["appearance", "字体、颜色与动效", "字体、高亮与流光演出", "text-aa"],
+  ["profiles", "显示方案", "预设、个人方案与备份", "stack"],
+  ["sync", "播放与同步", "播放器、校时与歌词来源", "waveform"],
+  ["status", "播放状态", "连接信息与故障诊断", "pulse"],
+  ["shortcuts", "快捷键", "查看、修改与清除全局快捷键", "keyboard"],
+  ["about", "关于与帮助", "版本、更新与反馈", "info"],
+];
+const shortcutLabels = {
+  toggleVisibility: "显示或隐藏", toggleLock: "锁定或解锁", lyricsEarlier: "歌词提前",
+  lyricsLater: "歌词延后", resync: "重新同步", switchPlayer: "切换播放器",
+};
 
 document.querySelector("#app").innerHTML = `
   <main class="overlay-shell" id="overlay-shell">
@@ -223,10 +254,13 @@ document.querySelector("#app").innerHTML = `
       </div>
     </footer>
 
-    <aside class="settings-panel" id="settings-panel" aria-hidden="true" aria-label="歌词显示设置">
+    <aside class="settings-panel" id="settings-panel" aria-hidden="true" aria-labelledby="settings-page-title" inert>
       <div class="settings-heading">
+        <button class="icon-button quiet" id="settings-back-button" type="button" aria-label="返回设置目录" title="返回设置目录" hidden>
+          <i class="ph ph-arrow-left" aria-hidden="true"></i>
+        </button>
         <div>
-          <strong>歌词与同步</strong>
+          <h2 id="settings-page-title" tabindex="-1">设置</h2>
           <span>即时预览 · 自动保存 · v${APP_VERSION}</span>
         </div>
         <button class="icon-button quiet" id="settings-close-button" type="button" aria-label="关闭设置">
@@ -234,15 +268,16 @@ document.querySelector("#app").innerHTML = `
         </button>
       </div>
 
-      <nav class="settings-tabs" aria-label="设置分类">
-        <button class="settings-tab is-active" type="button" data-settings-tab="display">显示</button>
-        <button class="settings-tab" type="button" data-settings-tab="sync">同步</button>
-        <button class="settings-tab" type="button" data-settings-tab="status">状态</button>
-        <button class="settings-tab" type="button" data-settings-tab="shortcuts">快捷键</button>
-        <button class="settings-tab" type="button" data-settings-tab="about">关于</button>
+      <nav class="settings-section settings-menu is-active" data-settings-section="home" aria-label="设置目录">
+        ${settingsPages.map(([id, title, detail, icon]) => `
+          <button class="settings-menu-item" type="button" data-settings-tab="${id}">
+            <i class="ph ph-${icon} settings-menu-icon" aria-hidden="true"></i>
+            <span><strong>${title}</strong><small>${detail}</small></span>
+            <i class="ph ph-caret-right" aria-hidden="true"></i>
+          </button>`).join("")}
       </nav>
 
-      <section class="settings-section is-active" data-settings-section="display">
+      <section class="settings-section" data-settings-section="layout" aria-label="排版与位置">
        <div class="settings-grid">
         <label class="setting-control">
           <span>显示行数 <output data-output="lineCount"></output></span>
@@ -264,6 +299,11 @@ document.querySelector("#app").innerHTML = `
           <span>上下位置 <output data-output="offsetY"></output></span>
           <input type="range" min="-35" max="35" step="1" data-setting="offsetY" />
         </label>
+       </div>
+      </section>
+
+      <section class="settings-section" data-settings-section="appearance" aria-label="字体、颜色与动效">
+       <div class="settings-grid">
         <label class="setting-control">
           <span>高亮效果</span>
           <select data-setting="colorEffect">
@@ -274,8 +314,8 @@ document.querySelector("#app").innerHTML = `
         <label class="setting-control">
           <span>歌词动效</span>
           <select data-setting="motionEffect">
-            <option value="soft">柔和跟随</option>
-            <option value="flow">流体聚焦</option>
+            <option value="soft">沉浸跟随</option>
+            <option value="flow">流光演出</option>
             <option value="none">关闭动效</option>
           </select>
         </label>
@@ -285,13 +325,6 @@ document.querySelector("#app").innerHTML = `
             <span id="font-selected-label"></span><i class="ph ph-caret-down" aria-hidden="true"></i>
           </button>
         </div>
-        <label class="setting-control setting-control-wide">
-          <span>显示预设</span>
-          <span class="preset-control">
-            <select id="display-preset-select"></select>
-            <button class="text-button" id="apply-preset-button" type="button">应用</button>
-          </span>
-        </label>
        </div>
 
        <div class="color-editor">
@@ -303,8 +336,17 @@ document.querySelector("#app").innerHTML = `
         <label>G <input type="number" min="0" max="255" step="1" data-color-channel="g" /></label>
         <label>B <input type="number" min="0" max="255" step="1" data-color-channel="b" /></label>
        </div>
-       <details class="personal-profiles">
-        <summary>我的显示方案 <span id="profile-count">0 / 20</span></summary>
+      </section>
+
+      <section class="settings-section" data-settings-section="profiles" aria-label="显示方案">
+        <label class="setting-control">
+          <span>显示预设</span>
+          <span class="preset-control">
+            <select id="display-preset-select"></select>
+            <button class="text-button" id="apply-preset-button" type="button">应用</button>
+          </span>
+        </label>
+        <div class="profile-heading">我的显示方案 <span id="profile-count">0 / 20</span></div>
         <div class="profile-editor">
           <label class="setting-control"><span>已保存方案</span><select id="personal-profile-select"><option value="">选择个人方案</option></select></label>
           <label class="setting-control"><span>方案名称</span><input class="setting-text" id="profile-name" maxlength="40" placeholder="例如：日常桌面、打游戏" /></label>
@@ -321,7 +363,7 @@ document.querySelector("#app").innerHTML = `
           <p class="setting-help">备份包含当前样式与个人方案。导入会恢复样式并合并方案；字体需要在本机安装。</p>
           <input id="profile-file-input" type="file" accept=".json,application/json" hidden />
         </div>
-       </details>
+        <div class="settings-footer"><button class="text-button" id="settings-reset-button" type="button">恢复默认显示</button></div>
       </section>
 
       <section class="settings-section" data-settings-section="status">
@@ -388,31 +430,27 @@ document.querySelector("#app").innerHTML = `
         </div>
         <p class="about-description">把音乐留在看得见的地方。<br />透明、安静，跟随每一句。</p>
         <p class="about-note" id="melody-discovery" role="status">${state.discoveredMelody ? "你发现了一段隐藏的旋律。" : "愿每一句喜欢的歌词，都有停留的地方。"}</p>
+        <div class="settings-footer settings-actions">
+          <button class="text-button" id="feedback-button" type="button">问题反馈</button>
+          <button class="text-button" id="update-check-button" type="button">检查更新</button>
+        </div>
       </section>
 
       <section class="settings-section" data-settings-section="shortcuts">
         <div class="shortcut-list">
-          <label><span>显示或隐藏</span><input readonly data-shortcut="toggleVisibility" /></label>
-          <label><span>锁定或解锁</span><input readonly data-shortcut="toggleLock" /></label>
-          <label><span>歌词提前</span><input readonly data-shortcut="lyricsEarlier" /></label>
-          <label><span>歌词延后</span><input readonly data-shortcut="lyricsLater" /></label>
-          <label><span>重新同步</span><input readonly data-shortcut="resync" /></label>
-          <label><span>切换播放器</span><input readonly data-shortcut="switchPlayer" /></label>
+          ${Object.entries(shortcutLabels).map(([action, label]) => `
+            <div class="shortcut-row">
+              <label for="shortcut-${action}">${label}</label>
+              <input id="shortcut-${action}" readonly placeholder="未设置" data-shortcut="${action}" />
+              <button class="text-button" type="button" data-clear-shortcut="${action}" aria-label="清除${label}快捷键">清除</button>
+            </div>`).join("")}
         </div>
         <div class="shortcut-footer">
-          <span>点击输入框后直接按下组合键</span>
+          <span>点击输入框录入；无需快捷键时可清除</span>
           <button class="text-button" id="shortcuts-reset-button" type="button">恢复默认快捷键</button>
         </div>
       </section>
 
-      <div class="settings-footer">
-          <span>优先使用真实逐字时间轴，普通歌词自动平滑推进</span>
-        <div class="settings-actions">
-          <button class="text-button" id="feedback-button" type="button">问题反馈</button>
-          <button class="text-button" id="update-check-button" type="button">检查更新</button>
-          <button class="text-button" id="settings-reset-button" type="button">恢复默认</button>
-        </div>
-      </div>
     </aside>
 
     <div class="font-picker-popup" id="font-picker-popup" popover="manual" hidden>
@@ -596,7 +634,7 @@ function syncSettingsPanel() {
 
 function applyDisplaySettings({ rerender = true } = {}) {
   const display = state.display;
-  const secondarySize = Math.max(18, Math.round(display.fontSize * 0.54));
+  const secondarySize = Math.max(18, Math.round(display.fontSize * 0.64));
   const stackHeight = display.fontSize
     + Math.max(0, display.lineCount - 1) * secondarySize
     + Math.max(0, display.lineCount - 1) * display.lineGap
@@ -627,6 +665,24 @@ function setSettingsOpen(open) {
   elements.settingsPanel.setAttribute("aria-hidden", String(!open));
   elements.settings.classList.toggle("is-active", open);
   elements.settingsPanel.inert = !open;
+  elements.settings.setAttribute("aria-expanded", String(open));
+  if (open) showSettingsPage("home");
+}
+
+function showSettingsPage(page, returnTo) {
+  fontPicker.close();
+  for (const section of elements.settingsPanel.querySelectorAll("[data-settings-section]")) {
+    const active = section.dataset.settingsSection === page;
+    section.classList.toggle("is-active", active);
+    if (active) section.scrollTop = 0;
+  }
+  const back = document.querySelector("#settings-back-button");
+  back.hidden = page === "home";
+  back.dataset.from = page;
+  const title = document.querySelector("#settings-page-title");
+  title.textContent = settingsPages.find(([id]) => id === page)?.[1] ?? "设置";
+  if (page === "status") renderDiagnostics();
+  (returnTo ?? title).focus({ preventScroll: !returnTo });
 }
 
 function formatTime(milliseconds) {
@@ -775,8 +831,10 @@ async function refreshMediaSources() {
   }
 }
 
+const lyricView = createLyricView(elements.stack);
+
 function setStageMessage(title, detail = "") {
-  elements.stack.replaceChildren();
+  lyricView.clear();
   const panel = document.createElement("div");
   panel.className = "empty-state";
   const heading = document.createElement("p");
@@ -829,131 +887,8 @@ function renderLyricWindow(activeIndex) {
     return;
   }
 
-  const previousActiveIndex = Number(
-    elements.stack.querySelector(".current-line[data-index]")?.dataset.index ?? -1,
-  );
-  const previousRects = new Map(
-    [...elements.stack.querySelectorAll(".lyric-line[data-index]")]
-      .map((line) => [Number(line.dataset.index), line.getBoundingClientRect()]),
-  );
-  const fragment = document.createDocumentFragment();
-  const visibleIndices = visibleLineIndices(state.lines.length, activeIndex, state.display.lineCount);
-
-  for (const index of visibleIndices) {
-    const line = document.createElement("div");
-    line.className = "lyric-line";
-    line.style.setProperty("font-family", "var(--lyric-font-family)", "important");
-    line.dataset.index = String(index);
-    const distance = index - activeIndex;
-    line.dataset.distance = String(Math.max(-2, Math.min(2, distance)));
-
-    if (index === activeIndex) {
-      line.classList.add("current-line");
-      const text = document.createElement("span");
-      text.className = "current-text";
-      text.dataset.effect = state.display.colorEffect;
-      if (state.lines[index].words?.length) {
-        text.classList.add("has-word-timing");
-        text.setAttribute("aria-label", state.lines[index].text);
-        for (const [wordIndex, word] of state.lines[index].words.entries()) {
-          const wordElement = document.createElement("span");
-          wordElement.className = "karaoke-word";
-          wordElement.dataset.wordIndex = String(wordIndex);
-          wordElement.setAttribute("aria-hidden", "true");
-          const base = document.createElement("span");
-          base.className = "karaoke-word-base";
-          base.textContent = word.text;
-          const highlight = document.createElement("span");
-          highlight.className = "karaoke-word-highlight";
-          highlight.textContent = word.text;
-          wordElement.append(base, highlight);
-          text.append(wordElement);
-        }
-      } else {
-        const baseText = document.createElement("span");
-        baseText.className = "current-text-base";
-        baseText.textContent = state.lines[index].text;
-        const highlightedText = document.createElement("span");
-        highlightedText.className = "current-text-highlight";
-        highlightedText.textContent = state.lines[index].text;
-        highlightedText.setAttribute("aria-hidden", "true");
-        text.append(baseText, highlightedText);
-      }
-      line.append(text);
-    } else {
-      line.classList.add(index < activeIndex ? "history-line" : "next-line");
-      line.textContent = state.lines[index].text;
-    }
-    fragment.append(line);
-  }
-  elements.stack.replaceChildren(fragment);
-  animateLyricWindow(previousRects, previousActiveIndex, activeIndex);
-}
-
-function playLyricAnimation(element, keyframes, options) {
-  const animation = element.animate(keyframes, options);
-  animation.finished.catch(() => {}).finally(() => animation.cancel());
-}
-
-function animateLyricWindow(previousRects, previousActiveIndex, activeIndex) {
-  const effect = state.display.motionEffect;
-  if (effect === "none" || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-
-  const flowing = effect === "flow";
-  const direction = previousActiveIndex >= 0 && activeIndex < previousActiveIndex ? -1 : 1;
-  const duration = flowing ? 620 : 420;
-  const easing = flowing ? "cubic-bezier(0.2, 0.9, 0.2, 1)" : "cubic-bezier(0.16, 1, 0.3, 1)";
-
-  for (const line of elements.stack.querySelectorAll(".lyric-line[data-index]")) {
-    const index = Number(line.dataset.index);
-    const previousRect = previousRects.get(index);
-    if (previousRect) {
-      const deltaY = previousRect.top - line.getBoundingClientRect().top;
-      if (Math.abs(deltaY) > 0.5) {
-        const frames = flowing
-          ? [
-              { translate: `0 ${deltaY}px`, filter: "blur(1.8px)" },
-              { translate: "0 -2px", filter: "blur(0)" },
-              { translate: "0 0", filter: "blur(0)" },
-            ]
-          : [
-              { translate: `0 ${deltaY}px` },
-              { translate: "0 0" },
-            ];
-        playLyricAnimation(line, frames, { duration, easing, fill: "both" });
-      }
-      continue;
-    }
-
-    const entryDistance = flowing ? 34 : 22;
-    playLyricAnimation(line, [
-      {
-        opacity: 0,
-        translate: `0 ${entryDistance * direction}px`,
-        filter: flowing ? "blur(7px)" : "blur(2px)",
-      },
-      { opacity: 1, translate: "0 0", filter: "blur(0)" },
-    ], { duration: flowing ? 520 : 360, easing, fill: "both" });
-  }
-
-  if (activeIndex === previousActiveIndex) return;
-  const currentText = elements.stack.querySelector(".current-text");
-  if (!currentText) return;
-  const focusFrames = flowing
-    ? [
-        { opacity: 0.45, transform: "translateY(8px) scale(0.965)", filter: "blur(5px)" },
-        { opacity: 1, transform: "translateY(-1px) scale(1.012)", filter: "blur(0)" },
-        { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
-      ]
-    : [
-        { opacity: 0.58, transform: "translateY(5px) scale(0.985)", filter: "blur(2px)" },
-        { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
-      ];
-  playLyricAnimation(currentText, focusFrames, {
-    duration: flowing ? 640 : 460,
-    easing,
-    fill: "both",
-  });
+  lyricView.render(state.lines, activeIndex, state.display);
+  lyricView.update(estimatedPosition() - state.lyricOffsetMs, state.durationMs);
 }
 
 function updateConnectionUi() {
@@ -1056,7 +991,12 @@ async function pollMedia() {
 }
 
 function animationFrame() {
-  const position = estimatedPosition();
+  let position = estimatedPosition();
+  if (!IS_TAURI && state.durationMs > 0 && position >= state.durationMs) {
+    position %= state.durationMs;
+    state.positionMs = position;
+    state.syncedAt = performance.now();
+  }
   elements.position.textContent = formatTime(position);
   elements.duration.textContent = formatTime(state.durationMs);
   const trackProgress = state.durationMs > 0 ? position / state.durationMs : 0;
@@ -1069,28 +1009,23 @@ function animationFrame() {
       state.activeIndex = activeIndex;
       renderLyricWindow(activeIndex);
     }
-    const progress = lineProgress(state.lines, activeIndex, lyricPosition, state.durationMs);
-    elements.stack
-      .querySelector(".current-text")
-      ?.style.setProperty("--karaoke-progress", `${(progress * 100).toFixed(2)}%`);
-    const activeLine = state.lines[activeIndex];
-    if (activeLine?.words?.length) {
-      for (const [wordIndex, word] of activeLine.words.entries()) {
-        const value = wordProgress(word, lyricPosition);
-        const wordElement = elements.stack.querySelector(`[data-word-index="${wordIndex}"]`);
-        wordElement?.style.setProperty("--word-progress", `${(value * 100).toFixed(2)}%`);
-        const emphasis = value > 0 && value < 1 ? Math.sin(Math.PI * value) : 0;
-        wordElement?.style.setProperty("--word-lift", `${(-1.5 * emphasis).toFixed(2)}px`);
-        wordElement?.style.setProperty("--word-scale", (1 + 0.035 * emphasis).toFixed(4));
-      }
-    }
+    lyricView.update(lyricPosition, state.durationMs);
   }
   requestAnimationFrame(animationFrame);
 }
 
 document.querySelectorAll("[data-media-action]").forEach((button) => {
   button.addEventListener("click", async () => {
-    if (!IS_TAURI) return;
+    if (!IS_TAURI) {
+      const action = button.dataset.mediaAction;
+      const position = estimatedPosition();
+      state.positionMs = action === "next" ? (Math.floor(position / 4000) + 1) * 4000 % state.durationMs
+        : action === "previous" ? Math.max(0, (Math.floor(position / 4000) - 1) * 4000) : position;
+      if (action === "toggle") state.isPlaying = !state.isPlaying;
+      state.syncedAt = performance.now();
+      updateConnectionUi();
+      return;
+    }
     button.classList.add("pressed");
     try {
       await invoke("control_media", {
@@ -1128,19 +1063,17 @@ elements.fullscreen.addEventListener("click", async () => {
 });
 
 elements.settings.addEventListener("click", () => setSettingsOpen(!state.settingsOpen));
-document.querySelector("#settings-close-button").addEventListener("click", () => setSettingsOpen(false));
+document.querySelector("#settings-close-button").addEventListener("click", () => {
+  setSettingsOpen(false);
+  elements.settings.focus();
+});
+
+document.querySelector("#settings-back-button").addEventListener("click", (event) => {
+  showSettingsPage("home", document.querySelector(`[data-settings-tab="${event.currentTarget.dataset.from}"]`));
+});
 
 for (const tab of document.querySelectorAll("[data-settings-tab]")) {
-  tab.addEventListener("click", () => {
-    fontPicker.close();
-    for (const item of document.querySelectorAll("[data-settings-tab]")) {
-      item.classList.toggle("is-active", item === tab);
-    }
-    for (const section of document.querySelectorAll("[data-settings-section]")) {
-      section.classList.toggle("is-active", section.dataset.settingsSection === tab.dataset.settingsTab);
-    }
-    if (tab.dataset.settingsTab === "status") renderDiagnostics();
-  });
+  tab.addEventListener("click", () => showSettingsPage(tab.dataset.settingsTab));
 }
 
 for (const input of settingInputs) {
@@ -1513,16 +1446,19 @@ elements.autostart.addEventListener("change", async () => {
 });
 
 const shortcutInputs = [...document.querySelectorAll("[data-shortcut]")];
+const shortcutClearButtons = [...document.querySelectorAll("[data-clear-shortcut]")];
 let unavailableShortcutActions = new Set();
 
 function syncShortcutInputs() {
   for (const input of shortcutInputs) {
     input.value = state.shortcuts[input.dataset.shortcut];
-    const unavailable = unavailableShortcutActions.has(input.dataset.shortcut);
+    const unavailable = Boolean(input.value) && unavailableShortcutActions.has(input.dataset.shortcut);
     input.classList.toggle("is-unavailable", unavailable);
     input.title = unavailable ? "这个组合键已被其他软件占用，请点击后重新设置" : "点击后直接按下新的组合键";
   }
-  elements.lock.title = `锁定 · ${state.shortcuts.toggleLock} 解锁`;
+  for (const button of shortcutClearButtons) button.disabled = !state.shortcuts[button.dataset.clearShortcut];
+  const lockShortcut = state.shortcuts.toggleLock;
+  elements.lock.title = lockShortcut && !unavailableShortcutActions.has("toggleLock") ? `锁定 · ${lockShortcut} 解锁` : "锁定 · 从系统托盘解锁";
 }
 
 async function registerShortcuts({ announce = false, changedAction = "" } = {}) {
@@ -1531,7 +1467,8 @@ async function registerShortcuts({ announce = false, changedAction = "" } = {}) 
   syncShortcutInputs();
   if (!IS_TAURI) return true;
   try {
-    const unavailable = await invoke("set_global_shortcuts", { shortcuts: state.shortcuts });
+    const shortcuts = Object.fromEntries(Object.entries(state.shortcuts).filter(([, value]) => value));
+    const unavailable = await invoke("set_global_shortcuts", { shortcuts });
     unavailableShortcutActions = new Set(unavailable);
     syncShortcutInputs();
     if (unavailable.length > 0) {
@@ -1546,10 +1483,37 @@ async function registerShortcuts({ announce = false, changedAction = "" } = {}) 
   }
 }
 
+let changingShortcut = false;
+
+async function changeShortcuts(next, changedAction = "") {
+  if (changingShortcut) return;
+  changingShortcut = true;
+  const previous = state.shortcuts;
+  state.shortcuts = next;
+  try {
+    if (!(await registerShortcuts({ announce: true, changedAction }))) {
+      state.shortcuts = previous;
+      await registerShortcuts();
+    }
+  } finally {
+    changingShortcut = false;
+  }
+}
+
+for (const button of shortcutClearButtons) {
+  button.addEventListener("click", () => {
+    const action = button.dataset.clearShortcut;
+    document.querySelector(`#shortcut-${action}`).focus();
+    changeShortcuts({ ...state.shortcuts, [action]: "" }, action);
+  });
+}
+
 for (const input of shortcutInputs) {
   input.addEventListener("focus", () => input.classList.add("is-recording"));
   input.addEventListener("blur", () => input.classList.remove("is-recording"));
   input.addEventListener("keydown", async (event) => {
+    if (event.key === "Tab") return;
+    if (event.key === "Escape") { input.blur(); return; }
     event.preventDefault();
     const shortcut = shortcutFromKeyboardEvent(event);
     if (!shortcut) return;
@@ -1558,26 +1522,20 @@ for (const input of shortcutInputs) {
       return;
     }
     const action = input.dataset.shortcut;
-    const previous = state.shortcuts[action];
-    state.shortcuts = { ...state.shortcuts, [action]: shortcut };
-    const duplicate = duplicateShortcut(state.shortcuts, action);
+    const next = { ...state.shortcuts, [action]: shortcut };
+    const duplicate = duplicateShortcut(next, action);
     if (duplicate) {
-      state.shortcuts[action] = previous;
       showToast("这个组合键已经用于其他功能");
       syncShortcutInputs();
       return;
     }
-    if (!(await registerShortcuts({ announce: true, changedAction: action }))) {
-      state.shortcuts[action] = previous;
-      await registerShortcuts();
-    }
+    await changeShortcuts(next, action);
     input.blur();
   });
 }
 
 document.querySelector("#shortcuts-reset-button").addEventListener("click", () => {
-  state.shortcuts = { ...DEFAULT_SHORTCUTS };
-  registerShortcuts({ announce: true });
+  changeShortcuts({ ...DEFAULT_SHORTCUTS });
 });
 
 document.querySelector("#feedback-button").addEventListener("click", async () => {
@@ -1661,7 +1619,9 @@ async function setLocked(locked) {
   state.locked = locked;
   elements.shell.classList.toggle("is-locked", locked);
   if (IS_TAURI) await invoke("set_click_through", { enabled: locked });
-  showToast(locked ? `已锁定，按 ${state.shortcuts.toggleLock} 解锁` : "窗口已解锁", locked ? 4_000 : 2_600);
+  const shortcut = state.shortcuts.toggleLock;
+  const unlock = shortcut && !unavailableShortcutActions.has("toggleLock") ? `按 ${shortcut} 解锁` : "从系统托盘选择「锁定或解锁」";
+  showToast(locked ? `已锁定，${unlock}` : "窗口已解锁", locked ? 4_000 : 2_600);
 }
 
 elements.lock.addEventListener("click", () => setTimeout(() => setLocked(true), 200));
@@ -1729,11 +1689,14 @@ if (IS_TAURI) {
   setInterval(checkForUpdates, 6 * 60 * 60 * 1_000);
 } else {
   state.connected = true;
-  state.title = "恋人";
-  state.artist = "李荣浩";
-  state.album = "黑马";
+  document.body.classList.add("browser-preview");
+  const previewMotion = new URLSearchParams(location.search).get("motion");
+  if (["soft", "flow", "none"].includes(previewMotion)) state.display.motionEffect = previewMotion;
+  state.title = "歌词动效预览";
+  state.artist = "原创演示文案 · 无音频";
+  state.album = "开发预览";
   state.isPlaying = true;
-  state.durationMs = 20_000;
+  state.durationMs = 32_000;
   state.lines = parseLrc(PREVIEW_LRC);
   state.lyricStatus = "ready";
   state.trackKey = "preview";

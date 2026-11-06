@@ -10,14 +10,14 @@ use tauri_plugin_dialog::DialogExt;
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
-const TARGET_VERSION: &str = "1.1.4";
+const TARGET_VERSION: &str = "1.1.5";
 const PRODUCT_NAME: &str = "RiverXILee桌面歌词";
 const MAIN_BINARY_NAME: &str = "riverxilee-desktop-lyrics.exe";
 const UNINSTALL_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RiverXILee桌面歌词";
 const INSTALL_LOCATION_ENV: &str = "RIVERXILEE_INSTALL_LOCATION";
 const INSTALLER_BYTES: &[u8] = include_bytes!(
-    "../../../src-tauri/target/release/bundle/nsis/RiverXILee桌面歌词_1.1.4_x64-setup.exe"
+    "../../../src-tauri/target/release/bundle/nsis/RiverXILee桌面歌词_1.1.5_x64-setup.exe"
 );
 
 #[derive(Serialize)]
@@ -227,6 +227,13 @@ async fn install_product(
     let installed_executable = recorded_location.join(MAIN_BINARY_NAME);
     if !installed_executable.exists() {
         return Err("安装完成后没有找到主程序，请检查安装目录权限".to_string());
+    }
+    let mut validation = Command::new(&installed_executable);
+    validation.arg("--check-resources");
+    #[cfg(windows)]
+    validation.creation_flags(0x08000000);
+    if !validation.status().map_err(error_text)?.success() {
+        return Err("安装资源缺失、损坏或版本不匹配，请重新下载安装包修复".to_string());
     }
 
     if let Some(previous_location) = previous_install_location {

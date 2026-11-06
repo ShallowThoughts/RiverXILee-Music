@@ -1,4 +1,4 @@
-# RiverXILee桌面歌词 v1.1.4
+# RiverXILee桌面歌词 v1.1.5（预发布）
 
 一个为 Windows 设计的沉浸式透明多平台桌面歌词工具。RiverXILee桌面歌词通过 Windows 系统媒体会话识别当前正在播放的歌曲、播放状态和时间轴，再自动匹配在线歌词，无需本地音频。
 
@@ -7,7 +7,9 @@
 - [下载最新安装版或便携版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/latest)
 - [查看历史版本与更新说明](https://github.com/ShallowThoughts/RiverXILee-Music/releases)
 
-v1.1.4 修复汽水音乐 SodaMusic 会话标识兼容，并为所有音乐平台增加 QQ 音乐、网易云双源取词兜底和明确的失败原因。现有 v1.1.3 用户可以检查更新；早期 v1.1.3 或 v1.1.2 的旧下载器若仍超时，请手动下载安装版覆盖升级。升级前请从托盘完全退出旧程序，选择原安装目录即可保留配置。
+v1.1.5 为多文件分发预发布版，提供自定义安装版和文件夹 ZIP，包含二级设置目录、可清除快捷键、歌词动效与彩色进度条调整。完整安装、覆盖升级和跨电脑运行仍待验收。
+
+[下载 v1.1.5 预发布版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/tag/v1.1.5)。正式稳定版仍为 v1.1.4；本次预发布不作为正式自动更新推送。升级前请从托盘完全退出旧程序，不要混用不同版本的主程序与资源。
 
 ## 使用方法
 
@@ -67,6 +69,12 @@ v1.1.4 修复汽水音乐 SodaMusic 会话标识兼容，并为所有音乐平�
 - 适合明暗背景的歌词描边、阴影和逐行高亮
 - 当前行未唱文字使用更清晰的轻描边，减少浅色背景上的灰块和模糊重影
 
+## 许可证
+
+Copyright (C) 2026 RiverXILee。本项目采用 GNU GPL v3.0（SPDX: GPL-3.0-only），见 [LICENSE](LICENSE)。
+第三方依赖仍遵循各自许可，分发包附带 [第三方许可声明](THIRD_PARTY_NOTICES.txt)。
+此许可证声明不等同于 Windows 代码签名或“已验证发布者”认证。
+
 ## 问题反馈
 
 软件设置面板内提供“问题反馈”入口，会自动附带当前版本、音乐平台、歌曲、播放进度、歌词匹配结果和时间偏移。也可以直接访问 [RiverXILee 反馈中心](https://riverxilee-feedback.riverxilee.chatgpt.site/)；提交后，查询信息会保存在当前浏览器，方便再次查看处理进度。
@@ -81,11 +89,23 @@ v1.1.4 修复汽水音乐 SodaMusic 会话标识兼容，并为所有音乐平�
 
 ## 开发与构建
 
+### 多文件分发（v1.1.5 预发布）
+
+主程序与界面资源分开：EXE 启动时从同目录的 resources/web 加载并校验页面、脚本、样式和字体。
+完整解压后运行主程序，不能只移动 EXE。安装版会将同一套资源安装到所选应用目录。
+用户配置和缓存仍保存在原有用户数据目录，不随 ZIP 自动迁移。
+详细用法见 [文件夹版说明](docs/FOLDER_DISTRIBUTION.md)。
+
+npm run package:folder 构建免安装文件夹和 ZIP；npm run release:windows 生成安装版与文件夹版 ZIP。
+现阶段应用内更新仍使用安装包，文件夹版升级应手动下载完整 ZIP。
+
 ```powershell
 npm install
 npm test
 npm run tauri dev
 npm run tauri build
 ```
+
+Steam 动态歌词状态已纳入 v1.2.0 开发计划，尚未实现，当前版本不支持。后续开发和验收须遵守 [Steam 歌词状态兼容性契约](docs/STEAM_LYRICS_STATUS.md)；只有使用自有 Steamworks AppID、配置显示模板并通过实机与好友视角验证后，才会作为已交付功能公布。
 
 运行环境为 Windows 10/11，使用 Tauri 2、Rust 和原生 Windows GSMTC 媒体接口。受支持的音乐客户端需要向 Windows 提供媒体会话、歌曲信息和时间轴；浏览器网页和未列入白名单的播放器不会参与同步。

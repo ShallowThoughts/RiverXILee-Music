@@ -61,6 +61,14 @@ test("parses NetEase YRC and QQ enhanced word timestamps", () => {
   assert.equal(wordProgress({ timeMs: 1_000, durationMs: 400 }, 1_200), 0.5);
 });
 
+test("keeps explicitly cleared shortcuts empty after saving, without disabling missing defaults", () => {
+  const shortcuts = sanitizeShortcuts(JSON.parse(JSON.stringify({ toggleLock: "", resync: "" })));
+  assert.equal(shortcuts.toggleLock, "");
+  assert.equal(shortcuts.resync, "");
+  assert.equal(shortcuts.toggleVisibility, DEFAULT_SHORTCUTS.toggleVisibility);
+  assert.equal(duplicateShortcut(shortcuts, "toggleLock"), null);
+});
+
 test("normalizes, validates and de-duplicates custom shortcuts", () => {
   assert.equal(normalizeShortcut("shift + ctrl + l"), "Ctrl+Shift+L");
   const shortcuts = sanitizeShortcuts({ toggleLock: "Alt+K" });

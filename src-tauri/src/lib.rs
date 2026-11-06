@@ -26,6 +26,8 @@ mod fonts;
 mod lyric_lookup;
 mod netease;
 mod updater;
+#[cfg(any(not(debug_assertions), test))]
+mod external_assets;
 
 static MEDIA_MANAGER: OnceLock<GlobalSystemMediaTransportControlsSessionManager> = OnceLock::new();
 static LYRICS_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -1566,6 +1568,37 @@ fn set_global_shortcuts(
 }
 
 pub fn run() {
+    #[cfg(debug_assertions)]
+    let context = tauri::generate_context!();
+    #[cfg(not(debug_assertions))]
+    let context = {
+        let resources = std::env::current_exe().ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("resources/web")));
+        let assets = resources.as_deref()
+            .ok_or_else(|| std::io::Error::other("Cannot locate application directory"))
+            .and_then(external_assets::ExternalAssets::load);
+        let check_only = std::env::args().any(|arg| arg == "--check-resources");
+        match assets {
+            Ok(assets) => {
+                if check_only { std::process::exit(0); }
+                tauri::generate_context!(assets = assets)
+            }
+            Err(error) => {
+                if !check_only {
+                    let message = format!("程序资源缺失、损坏或与版本不匹配。\n请完整解压 ZIP，或使用安装包修复，不要单独移动 EXE。\n\n{error}");
+                    let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+                    unsafe {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                            None, windows::core::PCWSTR(message.as_ptr()),
+                            windows::core::w!("RiverXILee桌面歌词"),
+                            windows::Win32::UI::WindowsAndMessaging::MB_OK
+                                | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR);
+                    }
+                }
+                std::process::exit(1);
+            }
+        }
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -1602,14 +1635,6 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_placement(&window)?;
                 watch_window_placement(&window);
-            }
-            let _ = app.global_shortcut().register("Ctrl+Shift+L");
-            if let Ok(shortcut) = Shortcut::from_str("Ctrl+Shift+L") {
-                SHORTCUT_ACTIONS
-                    .get_or_init(|| Mutex::new(HashMap::new()))
-                    .lock()
-                    .expect("shortcut actions should initialize")
-                    .insert(shortcut.id(), "toggleLock".to_string());
             }
             let tray_menu = MenuBuilder::new(app)
                 .text("toggle-visibility", "显示或隐藏歌词")
@@ -1670,6 +1695,6 @@ pub fn run() {
             save_display_backup,
             set_global_shortcuts
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run RiverXILee桌面歌词");
 }

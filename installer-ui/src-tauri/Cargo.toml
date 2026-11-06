@@ -1,6 +1,7 @@
 [package]
 name = "riverxilee-installer-center"
-version = "1.1.4"
+version = "1.1.5"
+license = "GPL-3.0-only"
 description = "RiverXILee Desktop Lyrics branded installer"
 authors = ["RiverXILee"]
 edition = "2024"

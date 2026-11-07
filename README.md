@@ -1,15 +1,17 @@
-# RiverXILee桌面歌词 v1.1.5（预发布）
+# RiverXILee桌面歌词 v1.1.5
 
 一个为 Windows 设计的沉浸式透明多平台桌面歌词工具。RiverXILee桌面歌词通过 Windows 系统媒体会话识别当前正在播放的歌曲、播放状态和时间轴，再自动匹配在线歌词，无需本地音频。
 
 ## 下载
 
-- [下载最新安装版或便携版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/latest)
+- [下载最新安装版或文件夹 ZIP](https://github.com/ShallowThoughts/RiverXILee-Music/releases/latest)
 - [查看历史版本与更新说明](https://github.com/ShallowThoughts/RiverXILee-Music/releases)
 
-v1.1.5 为多文件分发预发布版，提供自定义安装版和文件夹 ZIP，包含二级设置目录、可清除快捷键、歌词动效与彩色进度条调整。完整安装、覆盖升级和跨电脑运行仍待验收。
+v1.1.5 已于 2026-11-07 由预发布转为正式版，提供自定义安装版和文件夹 ZIP，包含二级设置目录、可清除快捷键、歌词动效与彩色进度条调整。转正沿用原有附件，不改动程序文件及其校验值。
 
-[下载 v1.1.5 预发布版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/tag/v1.1.5)。正式稳定版仍为 v1.1.4；本次预发布不作为正式自动更新推送。升级前请从托盘完全退出旧程序，不要混用不同版本的主程序与资源。
+[下载 v1.1.5 正式版](https://github.com/ShallowThoughts/RiverXILee-Music/releases/tag/v1.1.5)。液态玻璃整体 UI 改版留待后续，不纳入本次发布。升级前请从托盘完全退出旧程序，不要混用不同版本的主程序与资源。
+
+已知测试边界：完整安装、覆盖升级、卸载、跨电脑与真实音乐客户端回归仍待人工验收，详见 [发布说明](docs/RELEASE_v1.1.5.md)。
 
 ## 使用方法
 
@@ -89,7 +91,7 @@ Copyright (C) 2026 RiverXILee。本项目采用 GNU GPL v3.0（SPDX: GPL-3.0-onl
 
 ## 开发与构建
 
-### 多文件分发（v1.1.5 预发布）
+### 多文件分发
 
 主程序与界面资源分开：EXE 启动时从同目录的 resources/web 加载并校验页面、脚本、样式和字体。
 完整解压后运行主程序，不能只移动 EXE。安装版会将同一套资源安装到所选应用目录。

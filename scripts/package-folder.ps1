@@ -56,9 +56,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $folderPath "LICENSE")
     Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.txt") -Destination (Join-Path $folderPath "THIRD_PARTY_NOTICES.txt")
 
-    # Piping a Windows GUI executable waits for this non-UI diagnostic to exit.
-    & (Join-Path $folderPath $ExecutableName) --check-resources | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "The packaged application could not verify its external resources." }
+    # Explicitly wait for the non-UI check so Windows releases the executable before ZIP creation.
+    $resourceCheck = Start-Process -FilePath (Join-Path $folderPath $ExecutableName) -ArgumentList '--check-resources' -WindowStyle Hidden -Wait -PassThru
+    if ($resourceCheck.ExitCode -ne 0) { throw "The packaged application could not verify its external resources." }
     Compress-Archive -LiteralPath $folderPath -DestinationPath $zipPath -CompressionLevel Optimal
     $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $([IO.Path]::GetFileName($zipPath))" | Set-Content -LiteralPath "$zipPath.sha256" -Encoding ASCII

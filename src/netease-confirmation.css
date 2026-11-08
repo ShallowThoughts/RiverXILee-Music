@@ -1,0 +1,45 @@
+.netease-confirmation {
+  --glass-tint: rgb(6 22 30 / 92%);
+  width: min(440px, calc(100vw - 28px));
+  max-height: calc(100dvh - 28px);
+  margin: auto;
+  padding: 24px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 22px;
+  overflow: hidden;
+  background: #122a32;
+  color: #f0faf8;
+  font: 14px/1.7 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  user-select: text;
+}
+.netease-confirmation[open] { display: flex; flex-direction: column; gap: 20px; animation: consent-arrive 180ms cubic-bezier(.16,1,.3,1); }
+.netease-confirmation::backdrop { background: rgb(1 9 14 / 46%); backdrop-filter: blur(3px); }
+.netease-confirmation .consent-heading { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.netease-confirmation h2 { margin: 0; flex: 1; font-size: 19px; line-height: 1.45; font-weight: 650; letter-spacing: -.02em; }
+.consent-icon { display: grid; place-items: center; width: 38px; height: 38px; flex-shrink: 0; border-radius: 50%; background: rgb(161 248 221 / 12%); color: #a1f8dd; font-size: 21px; }
+.consent-step { color: #c6d9db; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.netease-confirmation .consent-copy { flex: 1; min-height: 0; overflow: auto; scrollbar-width: thin; scrollbar-color: #779b9b transparent; }
+.consent-copy p { margin: 0 0 14px; color: #d3e4e6; overflow-wrap: anywhere; }
+.consent-copy p:last-child { margin-bottom: 0; color: #f0faf8; }
+.netease-confirmation .consent-actions { display: flex; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; gap: 10px; }
+.consent-actions button { min-height: 38px; padding: 8px 17px; border-radius: 24px; border: 1px solid rgb(217 244 244 / 25%); background: rgb(211 240 240 / 7%); color: #f0faf8; font: inherit; font-size: 13px; cursor: pointer; }
+.consent-actions button:hover { background: rgb(211 240 240 / 15%); }
+.consent-actions [data-consent="accept"] { color: #a1f8dd; border-color: rgb(161 248 221 / 45%); background: rgb(161 248 221 / 10%); }
+.consent-actions button:focus-visible { outline: 2px solid #a1f8dd; outline-offset: 3px; }
+.netease-confirmation[data-stage="risk"] .consent-icon { color: #ffda9e; background: rgb(255 218 158 / 12%); }
+.netease-confirmation[data-stage="risk"] [data-consent="accept"] { color: #ffda9e; border-color: rgb(255 218 158 / 45%); background: rgb(255 218 158 / 8%); }
+.netease-confirmation ::selection { background: #a1f8dd; color: #0b2927; }
+@keyframes consent-arrive { from { opacity: .7; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+@media (max-height: 380px), (max-width: 420px) {
+  .netease-confirmation { padding: 18px; }
+  .netease-confirmation[open] { gap: 14px; }
+  .netease-confirmation h2 { font-size: 17px; }
+}
+@media (prefers-reduced-motion: reduce) { .netease-confirmation[open] { animation: none; } }
+@media (forced-colors: active) {
+  .netease-confirmation, .glass-preview .netease-confirmation.glass-surface { background: Canvas; color: CanvasText; border: 1px solid ButtonText; box-shadow: none; }
+  .netease-confirmation .glass-optics { display: none; }
+  .netease-confirmation :is(p, .consent-step, .consent-icon, button) { color: CanvasText; }
+  .netease-confirmation button { border-color: ButtonText; }
+}

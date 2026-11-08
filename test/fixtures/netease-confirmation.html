@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>网易云确认面板 · 仅外观预览</title>
+<link rel="stylesheet" href="/src/liquid-glass.css"><link rel="stylesheet" href="/src/netease-confirmation.css">
+<style>
+body { margin: 0; min-height: 100vh; color: #d7ecea; font: 14px/1.6 "Segoe UI", "Microsoft YaHei UI", sans-serif; background: linear-gradient(140deg,#264b5a,#b0c9c5 60%,#ded4bb); }
+body.dark { background: linear-gradient(140deg,#09151c,#24404b 70%,#173e3b); }
+main { padding: 28px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+main button { padding: 10px 18px; color: #effaf7; background: #153d45; border: 0; border-radius: 24px; font: inherit; cursor: pointer; }
+main span { color: #15343b; }
+body.dark main span { color: #c5deda; }
+</style><body class="glass-preview"><main>
+<button data-stage="purpose">开启说明</button><button data-stage="risk">二次风险提醒</button><button data-stage="restore">恢复确认</button><button id="theme">切换明暗背景</button>
+<span id="result" role="status">仅外观预览，不连接或重启任何播放器</span></main>
+<script type="module">
+import "@phosphor-icons/web/regular";
+import { createNeteaseConfirmation } from "/src/netease-confirmation.js";
+import { initLiquidGlass } from "/src/liquid-glass.js";
+const ui = createNeteaseConfirmation();
+initLiquidGlass([ui.dialog]);
+const copy = {
+  purpose: "即将临时重启网易云，以支持桌面歌词进度条跳转。\n\n音乐会中断；功能默认关闭，不修改网易云文件、快捷方式或开机启动设置，也不会在下次自动开启。\n\n继续查看第二次风险提醒？",
+  risk: "二次提醒：临时模式会开放仅限本机的调试端口。\n\n同一台电脑上的其他程序或网页可能通过该端口访问或控制网易云内部页面，包括登录状态相关信息。请仅在信任当前电脑环境时开启。\n\n退出桌面歌词不会关闭网易云的端口！使用设置中的“关闭并恢复普通模式”，或完全退出网易云后正常重开，才能关闭端口。\n\n确认承担风险，并立即重启网易云启用？",
+  restore: "将重启网易云并关闭本次临时调试端口，音乐会中断。\n\n是否关闭增强控制并恢复普通模式？",
+};
+for (const button of document.querySelectorAll('[data-stage]')) button.onclick = async () => {
+  const stage = button.dataset.stage;
+  const result = await ui.show({stage, message:copy[stage]});
+  document.querySelector('#result').textContent = result ? '预览：确认按钮已点击（不会执行任何操作）' : '预览：已取消，未执行操作';
+};
+document.querySelector('#theme').onclick = () => document.body.classList.toggle('dark');
+if (new URLSearchParams(location.search).has('show')) ui.show({stage:'risk',message:copy.risk});
+</script></body></html>

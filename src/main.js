@@ -1,6 +1,8 @@
 import "@phosphor-icons/web/regular";
 import "@phosphor-icons/web/fill";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
+import { createNeteaseConfirmation } from "./netease-confirmation.js";
+import "./netease-confirmation.css";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart";
@@ -1326,6 +1328,7 @@ document.querySelector("#reset-window-button").addEventListener("click", async (
 });
 
 const neteaseControlButton = document.querySelector("#netease-control-button");
+const neteaseConfirmation = createNeteaseConfirmation();
 const neteaseControlStatus = document.querySelector("#netease-control-status");
 let neteaseNeedsRestart = false;
 let neteaseControlBusy = false;
@@ -1347,16 +1350,23 @@ neteaseControlButton.addEventListener("click", async () => {
   neteaseControlBusy = true;
   neteaseControlButton.disabled = true;
   neteaseControlStatus.textContent = "等待确认或重启网易云，请稍候…";
+  const confirmation = new Channel(async (request) => {
+    const accepted = await neteaseConfirmation.show(request);
+    try { await invoke("answer_netease_control_confirmation", { id: request.id, accepted }); }
+    catch { showToast("确认已失效，本次操作已取消，请重试"); }
+  });
   try {
-    paintNeteaseControl(await invoke("configure_netease_control", { enable: !neteaseNeedsRestart }));
+    paintNeteaseControl(await invoke("configure_netease_control", { enable: !neteaseNeedsRestart, confirmation }));
     await pollMedia();
   } catch (error) {
     await refreshNeteaseControlAfterError();
     neteaseControlStatus.textContent = String(error);
     showToast("网易云增强控制未完成，请查看播放与同步中的说明");
   } finally {
+    neteaseConfirmation.cancel();
     neteaseControlBusy = false;
     neteaseControlButton.disabled = false;
+    neteaseControlButton.focus({ preventScroll: true });
   }
 });
 async function refreshNeteaseControlAfterError() {
@@ -1848,7 +1858,7 @@ if (!state.onboardingDismissed) setTimeout(() => {
 }, 3_000);
 
 const cleanupGlass = initLiquidGlass([
-  document.querySelector("#control-bar"), elements.settingsPanel, elements.updateBanner,
+  document.querySelector("#control-bar"), elements.settingsPanel, elements.updateBanner, neteaseConfirmation.dialog,
   elements.toast, document.querySelector("#font-picker-popup"), onboarding.card,
 ]);
 window.addEventListener("pagehide", cleanupGlass, { once: true });

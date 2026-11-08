@@ -607,9 +607,14 @@ async fn seek_media(position_ms: i64, source: String, title: String, artist: Str
 fn netease_control_status() -> netease_control::Status { netease_control::status() }
 
 #[tauri::command]
-async fn configure_netease_control(window: WebviewWindow, enable: bool) -> Result<netease_control::Status, String> {
-    let parent = window.hwnd().map_err(error_text)?.0 as usize;
-    tauri::async_runtime::spawn_blocking(move || netease_control::configure(enable, parent)).await.map_err(error_text)?
+async fn configure_netease_control(window: WebviewWindow, enable: bool, confirmation: tauri::ipc::Channel<netease_control::ConfirmationRequest>) -> Result<netease_control::Status, String> {
+    let owner = window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || netease_control::configure(enable, owner, confirmation)).await.map_err(error_text)?
+}
+
+#[tauri::command]
+fn answer_netease_control_confirmation(window: WebviewWindow, id: u64, accepted: bool) -> Result<(), String> {
+    netease_control::answer_confirmation(window.label(), id, accepted)
 }
 
 fn normalize(value: &str) -> String {
@@ -1877,6 +1882,7 @@ pub fn run() {
             seek_media,
             netease_control_status,
             configure_netease_control,
+            answer_netease_control_confirmation,
             fetch_lyrics,
             search_lyrics_candidates,
             fetch_lyrics_candidate,

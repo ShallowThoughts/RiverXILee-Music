@@ -4,16 +4,21 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{ffi::c_void, io::Read, net::{Ipv4Addr, Ipv6Addr, TcpListener}, path::PathBuf,
-    process::Command, sync::{Mutex, OnceLock}, thread::sleep, time::{Duration, Instant}};
-use windows::{core::{w, PCWSTR, PWSTR}, Win32::{Foundation::{CloseHandle, FILETIME, HWND},
+    process::Command, sync::{Mutex, OnceLock, mpsc, atomic::{AtomicU64, Ordering}}, thread::sleep, time::{Duration, Instant}};
+use windows::{core::{w, PCWSTR, PWSTR}, Win32::{Foundation::{CloseHandle, FILETIME},
     NetworkManagement::IpHelper::{GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCP6ROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER},
-    Networking::WinHttp::*, System::{Diagnostics::ToolHelp::*, Threading::*, RemoteDesktop::ProcessIdToSessionId},
-    UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_YESNO, MB_DEFBUTTON2, MB_ICONWARNING, MB_TOPMOST}}};
+    Networking::WinHttp::*, System::{Diagnostics::ToolHelp::*, Threading::*, RemoteDesktop::ProcessIdToSessionId}}};
 
 const PURPOSE: &str = "即将临时重启网易云，以支持桌面歌词进度条跳转。\n\n音乐会中断；功能默认关闭，不修改网易云文件、快捷方式或开机启动设置，也不会在下次自动开启。\n\n继续查看第二次风险提醒？";
 const RISK: &str = "二次提醒：临时模式会开放仅限本机的调试端口。\n\n同一台电脑上的其他程序或网页可能通过该端口访问或控制网易云内部页面，包括登录状态相关信息。请仅在信任当前电脑环境时开启。\n\n退出桌面歌词不会关闭网易云的端口！使用设置中的“关闭并恢复普通模式”，或完全退出网易云后正常重开，才能关闭端口。\n\n确认承担风险，并立即重启网易云启用？";
 const RESTORE: &str = "将重启网易云并关闭本次临时调试端口，音乐会中断。\n\n是否关闭增强控制并恢复普通模式？";
 static CONTROL: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+static CONFIRMATION_ID: AtomicU64 = AtomicU64::new(1);
+static PENDING_CONFIRMATION: Mutex<Option<PendingConfirmation>> = Mutex::new(None);
+
+struct PendingConfirmation { id: u64, owner: String, reply: mpsc::SyncSender<bool> }
+#[derive(Serialize, Clone)]
+pub struct ConfirmationRequest { id: u64, stage: &'static str, message: String }
 
 #[derive(Clone)]
 struct Process { pid: u32, started: u64, path: PathBuf }
@@ -74,10 +79,29 @@ pub fn status() -> Status {
 }
 pub fn can_seek() -> bool { status().enabled }
 
-fn confirm(parent: usize, text: &str) -> bool {
-    let text: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-    unsafe { MessageBoxW(Some(HWND(parent as *mut c_void)), PCWSTR(text.as_ptr()), w!("RiverXILee桌面歌词 · 网易云增强控制"),
-        MB_YESNO | MB_DEFBUTTON2 | MB_ICONWARNING | MB_TOPMOST) == IDYES }
+fn confirm(owner: &str, channel: &tauri::ipc::Channel<ConfirmationRequest>, text: &str) -> bool {
+    let id = CONFIRMATION_ID.fetch_add(1, Ordering::Relaxed);
+    let (reply, receive) = mpsc::sync_channel(1);
+    {
+        let Ok(mut pending) = PENDING_CONFIRMATION.lock() else { return false; };
+        if pending.is_some() { return false; }
+        *pending = Some(PendingConfirmation { id, owner: owner.into(), reply });
+    }
+    let stage = if text == PURPOSE { "purpose" } else if text == RISK { "risk" } else { "restore" };
+    let sent = channel.send(ConfirmationRequest { id, stage, message: text.into() }).is_ok();
+    // No listener, expired dialog, destroyed window or missing reply all cancel, never approve.
+    let accepted = sent && receive.recv_timeout(Duration::from_secs(120)).unwrap_or(false);
+    if let Ok(mut pending) = PENDING_CONFIRMATION.lock() {
+        if pending.as_ref().is_some_and(|p| p.id == id) { *pending = None; }
+    }
+    accepted
+}
+pub fn answer_confirmation(owner: &str, id: u64, accepted: bool) -> Result<(), String> {
+    let mut pending = PENDING_CONFIRMATION.lock().map_err(|_| "确认状态不可用")?;
+    if !pending.as_ref().is_some_and(|p| p.id == id && p.owner == owner) {
+        return Err("确认已失效，请重新操作".into());
+    }
+    pending.take().unwrap().reply.send(accepted).map_err(|_| "确认已超时，请重新操作".into())
 }
 fn double_confirm(mut ask: impl FnMut(&str) -> bool) -> bool { ask(PURPOSE) && ask(RISK) }
 
@@ -202,13 +226,13 @@ fn target(s: &Session) -> Result<String, String> {
     Err("当前网易云版本未提供兼容的播放器控制页面".into())
 }
 
-pub fn configure(enable: bool, parent: usize) -> Result<Status, String> {
+pub fn configure(enable: bool, owner: String, channel: tauri::ipc::Channel<ConfirmationRequest>) -> Result<Status, String> {
     let mut control = state().try_lock().map_err(|_| "增强控制正在处理，请稍候")?;
     if control.as_ref().is_some_and(|s| !alive(&s.process)) { *control = None; }
     if enable {
         if control.is_some() { return Err("请先关闭并恢复普通模式，再重新启用".into()); }
         let old = main_process()?;
-        if !double_confirm(|text| confirm(parent, text)) { return Ok(Status { enabled: false, needs_restart: false }); }
+        if !double_confirm(|text| confirm(&owner, &channel, text)) { return Ok(Status { enabled: false, needs_restart: false }); }
         // OS chooses a free local port. It is revalidated against the process after launch.
         let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|_| "无法申请本机回环端口")?;
         let port = reservation.local_addr().map_err(|e| e.to_string())?.port();
@@ -239,7 +263,7 @@ pub fn configure(enable: bool, parent: usize) -> Result<Status, String> {
         Err(format!("{last}。临时启动参数可能不被此版本支持；未修改客户端文件。若网易云仍未恢复，请完全退出后正常重开。"))
     } else {
         if let Some(s) = control.clone() {
-            if !confirm(parent, RESTORE) { return Ok(Status { enabled: s.ready, needs_restart: true }); }
+            if !confirm(&owner, &channel, RESTORE) { return Ok(Status { enabled: s.ready, needs_restart: true }); }
             exit(&s.process)?;
             // Check that the owned process really exited before starting ordinary mode.
             start(&s.process.path, None)?;
@@ -295,6 +319,31 @@ pub fn seek(position_ms: i64, title: &str, artist: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn confirmation_replies_are_window_bound_and_single_use() {
+        let (reply, receive) = mpsc::sync_channel(1);
+        *PENDING_CONFIRMATION.lock().unwrap() = Some(PendingConfirmation { id: 123, owner: "main".into(), reply });
+        assert!(answer_confirmation("other", 123, true).is_err());
+        assert!(answer_confirmation("main", 122, true).is_err());
+        assert!(receive.try_recv().is_err());
+        answer_confirmation("main", 123, false).unwrap();
+        assert!(!receive.recv().unwrap());
+        assert!(answer_confirmation("main", 123, true).is_err());
+        // Exercise the same serialized Channel request/reply path as the WebView.
+        // Approving the purpose step alone must not approve the second risk step.
+        let stages = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen = stages.clone();
+        let channel = tauri::ipc::Channel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Json(body) = body else { panic!("expected JSON confirmation"); };
+            let request: Value = serde_json::from_str(&body).unwrap();
+            let stage = request["stage"].as_str().unwrap();
+            seen.lock().unwrap().push(stage.to_string());
+            answer_confirmation("main", request["id"].as_u64().unwrap(), stage == "purpose").unwrap();
+            Ok(())
+        });
+        assert!(!double_confirm(|text| confirm("main", &channel, text)));
+        assert_eq!(*stages.lock().unwrap(), vec!["purpose", "risk"]);
+        assert!(PENDING_CONFIRMATION.lock().unwrap().is_none());
+    }
     #[test] fn starts_disabled_without_persisted_enablement() {
         let value = status();
         assert!(!value.enabled && !value.needs_restart);

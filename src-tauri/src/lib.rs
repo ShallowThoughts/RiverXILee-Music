@@ -1,3 +1,4 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -24,7 +25,10 @@ use windows::Media::Control::{
 use windows::Media::MediaPlaybackType;
 mod fonts;
 mod lyric_lookup;
+mod lyric_matching;
 mod netease;
+mod netease_control;
+mod qq_transport;
 mod updater;
 #[cfg(any(not(debug_assertions), test))]
 mod external_assets;
@@ -134,6 +138,7 @@ struct MediaSnapshot {
     artist: String,
     album: String,
     is_playing: bool,
+    can_seek: bool,
     playback_rate: f64,
     position_ms: i64,
     duration_ms: i64,
@@ -148,6 +153,10 @@ struct LyricsResult {
     song_mid: String,
     matched_title: String,
     matched_artist: String,
+    instrumental: bool,
+    match_revision: u8,
+    translation_lrc: Option<String>,
+    translation_revision: u8,
 }
 
 #[derive(Clone, Serialize)]
@@ -213,7 +222,13 @@ fn timeline_timestamp_ms(winrt_ticks: i64) -> Option<i64> {
     (unix_ms > 0).then_some(unix_ms)
 }
 
-fn netease_media_snapshot(track: netease::TrackSnapshot, captured_at_ms: u128) -> MediaSnapshot {
+async fn netease_media_snapshot(mut track: netease::TrackSnapshot, captured_at_ms: u128) -> MediaSnapshot {
+    if netease_control::can_seek() {
+        let title = track.title.clone(); let artist = track.artist.clone();
+        if let Ok(Some(duration)) = tauri::async_runtime::spawn_blocking(move || netease_control::duration_ms(&title, &artist)).await {
+            track.duration_ms = duration;
+        }
+    }
     MediaSnapshot {
         connected: true,
         source: "cloudmusic.exe".to_string(),
@@ -222,6 +237,7 @@ fn netease_media_snapshot(track: netease::TrackSnapshot, captured_at_ms: u128) -
         artist: track.artist,
         album: track.album,
         is_playing: track.is_playing,
+        can_seek: netease_control::can_seek() && track.duration_ms > 0,
         playback_rate: 1.0,
         position_ms: track.position_ms,
         duration_ms: track.duration_ms,
@@ -427,7 +443,7 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
         Ok(session) => session,
         Err(error) => {
             if (preferred_source.is_none() || preferred_netease) && let Some(track) = netease_track {
-                return Ok(netease_media_snapshot(track, captured_at_ms));
+                return Ok(netease_media_snapshot(track, captured_at_ms).await);
             }
             return Err(error);
         }
@@ -441,12 +457,12 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
         return Ok(netease_media_snapshot(
             netease_track.take().expect("NetEase track should exist"),
             captured_at_ms,
-        ));
+        ).await);
     }
 
     let Some(session) = session else {
         if (preferred_source.is_none() || preferred_netease) && let Some(track) = netease_track {
-            return Ok(netease_media_snapshot(track, captured_at_ms));
+            return Ok(netease_media_snapshot(track, captured_at_ms).await);
         }
         return Ok(MediaSnapshot {
             connected: false,
@@ -456,6 +472,7 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
             artist: String::new(),
             album: String::new(),
             is_playing: false,
+            can_seek: false,
             playback_rate: 1.0,
             position_ms: 0,
             duration_ms: 0,
@@ -479,7 +496,7 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
     let album_artist = properties.AlbumArtist().map_err(error_text)?.to_string();
 
     let mut position_ms = (timeline.Position().map_err(error_text)?.Duration / 10_000).max(0);
-    let duration_ms = (timeline.EndTime().map_err(error_text)?.Duration / 10_000).max(0);
+    let mut duration_ms = (timeline.EndTime().map_err(error_text)?.Duration / 10_000).max(0);
     let mut timeline_updated_at_ms = timeline
         .LastUpdatedTime()
         .ok()
@@ -497,6 +514,12 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
     } else {
         artist
     };
+    if needs_netease_clock(&source) && netease_control::can_seek() {
+        let expected_title = title.clone(); let expected_artist = resolved_artist.clone();
+        if let Ok(Some(duration)) = tauri::async_runtime::spawn_blocking(move || netease_control::duration_ms(&expected_title, &expected_artist)).await {
+            duration_ms = duration;
+        }
+    }
     let track_id = if source.to_ascii_lowercase().contains("cloudmusic") {
         netease::current_track_id(&title, &resolved_artist).unwrap_or_default()
     } else {
@@ -504,6 +527,9 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
     };
     Ok(MediaSnapshot {
         connected: true,
+        can_seek: duration_ms > 0 && (qq_transport::is_qq(&source)
+            || (needs_netease_clock(&source) && netease_control::can_seek())
+            || playback.Controls().and_then(|controls| controls.IsPlaybackPositionEnabled()).unwrap_or(false)),
         source,
         track_id,
         title,
@@ -536,6 +562,54 @@ async fn control_media(action: String, preferred_source: Option<String>) -> Resu
         _ => return Err("不支持的媒体操作".to_string()),
     };
     operation.await.map_err(error_text)
+}
+
+fn seek_ticks(position_ms: i64, start_ticks: i64, end_ticks: i64) -> Result<i64, String> {
+    if position_ms < 0 || end_ticks <= start_ticks.max(0) { return Err("当前歌曲没有可跳转的播放区间".into()); }
+    Ok(position_ms.saturating_mul(10_000).clamp(start_ticks.max(0), end_ticks))
+}
+
+#[tauri::command]
+async fn seek_media(position_ms: i64, source: String, title: String, artist: String) -> Result<bool, String> {
+    if source.is_empty() || title.is_empty() { return Err("尚未连接可控制的歌曲".into()); }
+    if needs_netease_clock(&source) && netease_control::can_seek() {
+        return tauri::async_runtime::spawn_blocking(move || netease_control::seek(position_ms, &title, &artist))
+            .await.map_err(error_text)?.map(|_| true);
+    }
+    let Some(session) = active_media_session(Some(&source)).await? else {
+        return Err("播放器未提供进度控制，请在音乐软件内调整".into());
+    };
+    if !session.SourceAppUserModelId().map_err(error_text)?.to_string().eq_ignore_ascii_case(&source) {
+        return Err("播放器已切换，请重新拖动进度条".into());
+    }
+    let properties = session.TryGetMediaPropertiesAsync().map_err(error_text)?.await.map_err(error_text)?;
+    let current_artist = properties.Artist().map_err(error_text)?.to_string();
+    let current_artist = if current_artist.is_empty() { properties.AlbumArtist().map_err(error_text)?.to_string() } else { current_artist };
+    if properties.Title().map_err(error_text)?.to_string() != title || current_artist != artist {
+        return Err("歌曲已切换，本次进度调整已取消".into());
+    }
+    if qq_transport::is_qq(&source) {
+        return tauri::async_runtime::spawn_blocking(move || qq_transport::seek(position_ms, &title, &artist))
+            .await.map_err(error_text)?.map(|_| true);
+    }
+    if !session.GetPlaybackInfo().and_then(|info| info.Controls())
+        .and_then(|controls| controls.IsPlaybackPositionEnabled()).unwrap_or(false) {
+        return Err("当前播放器不支持外部进度跳转，请在音乐软件内调整".into());
+    }
+    let timeline = session.GetTimelineProperties().map_err(error_text)?;
+    let ticks = seek_ticks(position_ms, timeline.StartTime().map_err(error_text)?.Duration,
+        timeline.EndTime().map_err(error_text)?.Duration)?;
+    tokio::time::timeout(Duration::from_secs(5), session.TryChangePlaybackPositionAsync(ticks).map_err(error_text)?)
+        .await.map_err(|_| "播放器进度跳转超时，请稍后重试".to_string())?.map_err(error_text)
+}
+
+#[tauri::command]
+fn netease_control_status() -> netease_control::Status { netease_control::status() }
+
+#[tauri::command]
+async fn configure_netease_control(window: WebviewWindow, enable: bool) -> Result<netease_control::Status, String> {
+    let parent = window.hwnd().map_err(error_text)?.0 as usize;
+    tauri::async_runtime::spawn_blocking(move || netease_control::configure(enable, parent)).await.map_err(error_text)?
 }
 
 fn normalize(value: &str) -> String {
@@ -592,6 +666,7 @@ fn candidate_score(
     duration_ms: i64,
 ) -> i64 {
     let candidate_title = candidate["songname"].as_str().unwrap_or_default();
+    if lyric_matching::version_tags(title) != lyric_matching::version_tags(candidate_title) { return -1; }
     let candidate_album = candidate["albumname"].as_str().unwrap_or_default();
     let candidate_artist = candidate["singer"]
         .as_array()
@@ -640,7 +715,7 @@ fn candidate_score(
             score += 50;
         } else if difference <= 6_000 {
             score += 20;
-        } else if difference > 15_000 {
+        } else if difference > 6_000 {
             return -1;
         } else {
             score -= 50;
@@ -664,6 +739,7 @@ fn netease_artist(candidate: &Value) -> String {
 }
 
 fn netease_candidate_score(candidate: &Value, title: &str, artist: &str, duration_ms: i64) -> i64 {
+    if lyric_matching::version_tags(title) != lyric_matching::version_tags(candidate["name"].as_str().unwrap_or_default()) { return -1; }
     let wanted_title = normalize(title);
     let found_title = normalize(candidate["name"].as_str().unwrap_or_default());
     let wanted_artist = normalize(artist);
@@ -698,7 +774,7 @@ fn netease_candidate_score(candidate: &Value, title: &str, artist: &str, duratio
             score += 50;
         } else if difference <= 6_000 {
             score += 20;
-        } else if difference > 15_000 {
+        } else if difference > 6_000 {
             return -1;
         } else {
             score -= 50;
@@ -735,7 +811,7 @@ async fn search_qq_songs(client: &reqwest::Client, query: &str) -> Result<Vec<Va
     }
 }
 
-async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Result<Option<String>, String> {
+async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Result<Option<lyric_lookup::LyricBody>, String> {
     let native = lyric_lookup::json(client
         .get("https://music.163.com/api/song/lyric")
         .header("Referer", "https://music.163.com/")
@@ -747,8 +823,13 @@ async fn fetch_netease_lrc(client: &reqwest::Client, track_id: &str) -> Result<O
             ("yv", "-1"),
             ("os", "pc"),
         ]), "网易云音乐").await?;
+    if native["nolyric"].as_bool() == Some(true) { return Ok(Some(lyric_lookup::LyricBody::Instrumental)); }
     Ok(["yrc", "lrc"].iter().find_map(|kind| native[*kind]["lyric"].as_str()
-        .filter(|value| lyric_lookup::has_timed_text(value)).map(str::to_string)))
+        .filter(|value| lyric_lookup::has_timed_text(value) || lyric_lookup::instrumental_text(value)).map(|text| {
+            if lyric_lookup::instrumental_text(text) { lyric_lookup::LyricBody::Instrumental }
+            else { lyric_lookup::LyricBody::Timed(text.to_string(), native["tlyric"]["lyric"].as_str()
+                .filter(|text| lyric_lookup::has_timed_text(text)).map(str::to_string)) }
+        })))
 }
 
 async fn fetch_netease_lyrics(
@@ -762,12 +843,7 @@ async fn fetch_netease_lyrics(
         && track_id.chars().all(|character| character.is_ascii_digit())
         && let Some(lrc) = fetch_netease_lrc(client, track_id).await?
     {
-        return Ok(Some(LyricsResult {
-            lrc,
-            song_mid: format!("netease:{track_id}"),
-            matched_title: title.to_string(),
-            matched_artist: artist.to_string(),
-        }));
+        return Ok(Some(lyric_lookup::make_result(lrc, format!("netease:{track_id}"), title.to_string(), artist.to_string())));
     }
 
     let mut tried_ids = HashSet::new();
@@ -794,12 +870,8 @@ async fn fetch_netease_lyrics(
                 continue;
             }
             if let Some(lrc) = fetch_netease_lrc(client, &candidate_id).await? {
-                return Ok(Some(LyricsResult {
-                    lrc,
-                    song_mid: format!("netease:{candidate_id}"),
-                    matched_title: candidate["name"].as_str().unwrap_or(title).to_string(),
-                    matched_artist: netease_artist(candidate),
-                }));
+                return Ok(Some(lyric_lookup::make_result(lrc, format!("netease:{candidate_id}"),
+                    candidate["name"].as_str().unwrap_or(title).to_string(), netease_artist(candidate))));
             }
         }
     }
@@ -813,10 +885,28 @@ fn decode_entities(value: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+        .replace("&#10;", "\n")
+        .replace("&#13;", "\r")
         .replace("&amp;", "&")
 }
 
-async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Result<Option<String>, String> {
+async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Result<Option<lyric_lookup::LyricBody>, String> {
+    // The legacy endpoint can return an empty trans even when QQ has a translation.
+    // Use the public web player's same-song endpoint; keep legacy lyrics as fallback.
+    let request = serde_json::json!({
+        "comm": {"ct": 24, "cv": 0},
+        "lyric": {"module": "music.musichallSong.PlayLyricInfo", "method": "GetPlayLyricInfo",
+            "param": {"songMID": song_mid, "trans": 1}}
+    });
+    if let Ok(response) = lyric_lookup::json(client
+        .get("https://u.y.qq.com/cgi-bin/musicu.fcg")
+        .header("Referer", "https://y.qq.com/")
+        .query(&[("format", "json"), ("data", &request.to_string())]), "QQ 音乐").await
+        && response["lyric"]["code"].as_i64() == Some(0)
+        && let Some(body) = qq_lyric_body(&response["lyric"]["data"], true)
+    {
+        return Ok(Some(body));
+    }
     let lyric = lyric_lookup::json(client
         .get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg")
         .header("Referer", "https://y.qq.com/")
@@ -826,11 +916,23 @@ async fn fetch_qq_lrc(client: &reqwest::Client, song_mid: &str) -> Result<Option
             ("nobase64", "1"),
             ("g_tk", "5381"),
         ]), "QQ 音乐").await?;
-    Ok(lyric["lyric"]
-        .as_str()
+    Ok(qq_lyric_body(&lyric, false))
+}
+
+fn qq_lyric_body(lyric: &Value, encoded: bool) -> Option<lyric_lookup::LyricBody> {
+    let decode = |value: &str| -> Option<String> {
+        let text = if encoded {
+            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(value).ok()?).ok()?
+        } else { value.to_string() };
+        Some(decode_entities(&text))
+    };
+    lyric["lyric"].as_str()
         .filter(|value| !value.trim().is_empty())
-        .map(decode_entities)
-        .filter(|value| lyric_lookup::has_timed_text(value)))
+        .and_then(decode)
+        .filter(|value| lyric_lookup::has_timed_text(value) || lyric_lookup::instrumental_text(value))
+        .map(|text| if lyric_lookup::instrumental_text(&text) { lyric_lookup::LyricBody::Instrumental }
+            else { lyric_lookup::LyricBody::Timed(text, lyric["trans"].as_str().and_then(decode)
+                .filter(|text| lyric_lookup::has_timed_text(text))) })
 }
 
 fn lyrics_http_client() -> &'static reqwest::Client {
@@ -938,12 +1040,7 @@ async fn fetch_lyrics_candidate(
     }
     ?
     .ok_or_else(|| "这个版本没有可用的时间轴歌词".to_string())?;
-    Ok(LyricsResult {
-        lrc,
-        song_mid: format!("{provider}:{id}"),
-        matched_title: title,
-        matched_artist: artist,
-    })
+    Ok(lyric_lookup::make_result(lrc, format!("{provider}:{id}"), title, artist))
 }
 
 fn version_numbers(value: &str) -> Vec<u64> {
@@ -978,7 +1075,7 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 
 #[tauri::command]
 async fn check_for_update() -> Result<UpdateInfo, String> {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let current_version = "1.2.0.0".to_string();
     let release = updater::fetch_release().await?;
     let latest_version = release["tag_name"]
         .as_str()
@@ -1079,13 +1176,17 @@ async fn fetch_lyrics_inner(
     if title.trim().is_empty() {
         return Err("当前播放器暂未提供歌曲名称".to_string());
     }
+    if lyric_matching::instrumental_title(&title) {
+        return Ok(lyric_lookup::make_result(lyric_lookup::LyricBody::Instrumental,
+            "metadata:instrumental".to_string(), title, artist));
+    }
     let client = lyrics_http_client();
     let is_netease = source.to_ascii_lowercase().contains("cloudmusic");
     // Prefer an exact native ID, but do not let a stalled native endpoint consume
     // the whole lookup deadline or block the other catalog.
     if is_netease && !track_id.is_empty() && track_id.chars().all(|c| c.is_ascii_digit()) {
         if let Ok(Ok(Some(lrc))) = tokio::time::timeout(Duration::from_secs(3), fetch_netease_lrc(client, &track_id)).await {
-            return Ok(LyricsResult { lrc, song_mid: format!("netease:{track_id}"), matched_title: title, matched_artist: artist });
+            return Ok(lyric_lookup::make_result(lrc, format!("netease:{track_id}"), title, artist));
         }
     }
     let netease = lyric_lookup::bounded("网易云音乐", fetch_netease_lyrics(client, &title, &artist, duration_ms, ""));
@@ -1137,12 +1238,8 @@ async fn fetch_qq_lyrics(
                 })
                 .unwrap_or_default();
 
-            return Ok(Some(LyricsResult {
-                lrc,
-                song_mid: song_mid.to_string(),
-                matched_title: candidate["songname"].as_str().unwrap_or(title).to_string(),
-                matched_artist,
-            }));
+            return Ok(Some(lyric_lookup::make_result(lrc, song_mid.to_string(),
+                candidate["songname"].as_str().unwrap_or(title).to_string(), matched_artist)));
         }
     }
     Ok(None)
@@ -1165,6 +1262,101 @@ mod tests {
         assert!(super::candidate_score(&song, "我要的", "歌手乙", "", 240000) < 0);
         assert!(super::candidate_score(&song, "我要的", "歌手甲", "", 180000) < 0);
         assert!(super::candidate_score(&song, "我要的", "歌手甲", "", 241000) >= 220);
+        assert!(super::candidate_score(&song, "我要的", "歌手甲", "", 232000) < 0);
+        let live = serde_json::json!({"songname":"我要的 (Live)", "singer":[{"name":"歌手甲"}], "interval":240});
+        assert!(super::candidate_score(&live, "我要的", "歌手甲", "", 240000) < 0);
+    }
+
+    #[test]
+    fn explicit_instrumental_version_does_not_query_catalogs() {
+        let result = tauri::async_runtime::block_on(super::fetch_lyrics_inner(
+            "曲目（伴奏）".into(), "歌手".into(), "专辑".into(), 180000, "QQMusic.exe".into(), "".into())).unwrap();
+        assert!(result.instrumental && result.lrc.is_empty());
+        assert_eq!(result.song_mid, "metadata:instrumental");
+    }
+
+    #[test]
+    fn seek_conversion_bounds_targets_and_never_overflows() {
+        assert_eq!(super::seek_ticks(1500, 0, 20_000_000).unwrap(), 15_000_000);
+        assert_eq!(super::seek_ticks(5000, 0, 20_000_000).unwrap(), 20_000_000);
+        assert_eq!(super::seek_ticks(0, 10_000, 20_000_000).unwrap(), 10_000);
+        assert_eq!(super::seek_ticks(i64::MAX, 0, 20_000_000).unwrap(), 20_000_000);
+        assert!(super::seek_ticks(-1, 0, 20_000_000).is_err());
+        assert!(super::seek_ticks(0, -100, -50).is_err());
+        assert!(super::seek_ticks(0, 0, 0).is_err());
+    }
+
+    #[test]
+    #[ignore = "read-only live media seek capability check"]
+    fn live_seek_capability() {
+        let snapshot = tauri::async_runtime::block_on(super::get_media_snapshot(None)).unwrap();
+        println!("seek capability: connected={} source={} can_seek={} duration_ms={}",
+            snapshot.connected, snapshot.source, snapshot.can_seek, snapshot.duration_ms);
+    }
+
+    #[test]
+    #[ignore = "live QQ local transport seek and restore, temporarily changes progress by five seconds"]
+    fn live_qq_seek_and_restore() {
+        tauri::async_runtime::block_on(async {
+            let original = super::get_media_snapshot(Some("QQMusic.exe".into())).await.unwrap();
+            assert!(super::qq_transport::is_qq(&original.source) && original.can_seek && original.duration_ms > 10000);
+            let target = if original.position_ms + 7000 < original.duration_ms { original.position_ms + 5000 }
+                else { (original.position_ms - 5000).max(0) };
+            let started = std::time::Instant::now();
+            let accepted = super::seek_media(target, original.source.clone(), original.title.clone(), original.artist.clone()).await;
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            let observed = super::get_media_snapshot(Some(original.source.clone())).await.unwrap();
+            println!("QQ real seek: accepted={accepted:?} target_ms={target} observed_ms={} same_song={}",
+                observed.position_ms, observed.title == original.title && observed.artist == original.artist);
+            if observed.title == original.title && observed.artist == original.artist {
+                let restore = original.position_ms + if original.is_playing { started.elapsed().as_millis() as i64 } else { 0 };
+                let restored = super::seek_media(restore, original.source, original.title, original.artist).await;
+                println!("QQ seek restore: result={restored:?}");
+                assert_eq!(restored, Ok(true));
+            }
+            assert_eq!(accepted, Ok(true));
+            assert!((observed.position_ms - target).abs() < 2000, "real player clock must follow the requested position");
+        });
+    }
+
+    #[test]
+    #[ignore = "live single-track automatic QQ priority smoke test"]
+    fn live_qq_priority_smoke() {
+        let result = tauri::async_runtime::block_on(super::fetch_lyrics(
+            "Supernova".into(), "aespa".into(), "Supernova".into(), 178000,
+            "QQMusic.exe".into(), String::new())).expect("automatic lookup should return timed lyrics");
+        assert!(!result.instrumental);
+        assert!(super::lyric_lookup::has_timed_text(&result.lrc));
+        println!("QQ automatic smoke: provider={}, timed_bytes={}", result.song_mid, result.lrc.len());
+    }
+
+    #[test]
+    fn qq_web_lyric_response_decodes_original_and_translation_without_html_execution() {
+        use base64::Engine;
+        let encode = |text: &str| base64::engine::general_purpose::STANDARD.encode(text);
+        let payload = serde_json::json!({"lyric": encode("[00:01.00]Hello&#10;[00:03.00]World"),
+            "trans": encode("[00:01.00]你好&#10;[00:03.00]世界")});
+        let Some(super::lyric_lookup::LyricBody::Timed(original, Some(translation))) = super::qq_lyric_body(&payload, true)
+            else { panic!("web response should preserve both timed streams") };
+        assert_eq!(original, "[00:01.00]Hello\n[00:03.00]World");
+        assert_eq!(translation, "[00:01.00]你好\n[00:03.00]世界");
+        let invalid = serde_json::json!({"lyric": encode("[00:01.00]Hello"), "trans": "not base64!"});
+        assert!(matches!(super::qq_lyric_body(&invalid, true), Some(super::lyric_lookup::LyricBody::Timed(_, None))));
+        assert!(super::qq_lyric_body(&serde_json::json!({"lyric": "not base64!"}), true).is_none());
+        let legacy = serde_json::json!({"lyric": "[00:01.00]Hello", "trans": "[00:01.00]你好"});
+        assert!(matches!(super::qq_lyric_body(&legacy, false), Some(super::lyric_lookup::LyricBody::Timed(_, Some(_)))));
+    }
+
+    #[test]
+    #[ignore = "live QQ same-song platform translation regression"]
+    fn live_qq_platform_translation() {
+        let body = tauri::async_runtime::block_on(super::fetch_qq_lrc(super::lyrics_http_client(), "002sXtHN37Aqki"))
+            .expect("QQ lyric request should succeed").expect("the selected song should have lyrics");
+        let super::lyric_lookup::LyricBody::Timed(original, Some(translation)) = body
+            else { panic!("QQ web endpoint should return the platform translation for this song") };
+        assert!(super::lyric_lookup::has_timed_text(&original));
+        assert!(super::lyric_lookup::has_timed_text(&translation));
+        println!("QQ same-song bilingual smoke: mid=002sXtHN37Aqki original_bytes={} translation_bytes={}", original.len(), translation.len());
     }
 
     #[test]
@@ -1233,6 +1425,10 @@ mod tests {
 
     #[test]
     fn compares_release_versions_numerically() {
+        assert!(super::is_newer_version("1.2.0.0", "1.1.5"));
+        assert!(!super::is_newer_version("1.2.0.0", "1.2.0"));
+        assert!(!super::is_newer_version("1.2.0", "1.2.0.0"));
+        assert!(super::is_newer_version("1.2.0.1", "1.2.0.0"));
         assert!(super::is_newer_version("v1.1.1", "1.1.0"));
         assert!(super::is_newer_version("1.10.0", "1.9.9"));
         assert!(!super::is_newer_version("v1.1.0", "1.1.0"));
@@ -1244,7 +1440,7 @@ mod tests {
     fn reads_the_live_github_release_feed() {
         let update = tauri::async_runtime::block_on(super::check_for_update())
             .expect("GitHub latest release should be readable");
-        assert_eq!(update.current_version, env!("CARGO_PKG_VERSION"));
+        assert!(!super::is_newer_version(&update.current_version, env!("CARGO_PKG_VERSION")));
         assert!(!update.latest_version.is_empty());
         assert!(update.download_url.starts_with("https://github.com/"));
         assert_eq!(update.sha256.len(), 64);
@@ -1599,6 +1795,8 @@ pub fn run() {
             }
         }
     };
+    let autostart_name = context.config().product_name.clone()
+        .unwrap_or_else(|| "RiverXILee桌面歌词".to_string());
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -1611,7 +1809,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
-                .app_name("RiverXILee桌面歌词")
+                .app_name(autostart_name)
                 .build(),
         )
         .plugin(
@@ -1676,6 +1874,9 @@ pub fn run() {
             list_media_sessions,
             list_system_fonts,
             control_media,
+            seek_media,
+            netease_control_status,
+            configure_netease_control,
             fetch_lyrics,
             search_lyrics_candidates,
             fetch_lyrics_candidate,

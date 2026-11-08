@@ -1,5 +1,7 @@
 import { parseLrc } from "./lyrics.js";
 import { musicSourceKey as sourceKey } from "./media-sources.js";
+import { usableLyricCache } from "./lyric-cache.js";
+import { attachTranslations, needsTranslationRefresh } from "./translations.js";
 
 // IDs and durations can arrive after the title, or fluctuate between media readers.
 export function lyricTrackKey(track) {
@@ -52,7 +54,8 @@ export function createLyricSession({ state, request, notify, save, now = () => p
     const key = state.trackKey;
     const track = { ...snapshot };
     const manual = Boolean(manualRequest);
-    const retained = manual && state.lines.length ? { lines: state.lines, match: state.lyricMatch } : null;
+    const retained = manual && (state.lines.length || state.lyricStatus === "instrumental")
+      ? { lines: state.lines, match: state.lyricMatch, status: state.lyricStatus } : null;
     state.lyricAttempts += 1;
     state.lyricStatus = "loading";
     state.lyricMessage = "";
@@ -66,8 +69,10 @@ export function createLyricSession({ state, request, notify, save, now = () => p
     let timer;
     let abortHandler;
     try {
-      const cached = !manual && !force ? cachedLyricsFor(state.lyricCache, track) : null;
-      const result = cached?.lrc && parseLrc(cached.lrc).length ? cached : await Promise.race([
+      const entry = !manual && !force ? cachedLyricsFor(state.lyricCache, track) : null;
+      const cached = usableLyricCache(entry, track)
+        && !(state.display?.translationMode === "bilingual" && needsTranslationRefresh(entry)) ? entry : null;
+      const result = cached && (cached.instrumental || cached.lrc && parseLrc(cached.lrc).length) ? cached : await Promise.race([
         Promise.resolve().then(() => manualRequest ? manualRequest() : request(track)),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error("歌词请求超时，将自动重试")), timeoutMs);
@@ -76,14 +81,16 @@ export function createLyricSession({ state, request, notify, save, now = () => p
         }),
       ]);
       if (token !== state.fetchToken || key !== state.trackKey) return false;
-      const lines = parseLrc(result.lrc);
-      if (!lines.length) throw new Error("歌词没有可用的时间标签，可尝试其他版本或导入 LRC");
+      const lines = result.instrumental ? [] : attachTranslations(parseLrc(result.lrc), result.translationLrc);
+      if (!result.instrumental && !lines.length) throw new Error("歌词没有可用的时间标签，可尝试其他版本或导入 LRC");
       state.lines = lines;
-      state.lyricStatus = "ready";
+      state.lyricStatus = result.instrumental ? "instrumental" : "ready";
       state.lyricMatch = manual ? { ...result, manuallySelected: true } : result;
       state.lyricFromCache = result === cached;
       state.lyricRetryAt = 0;
-      state.lyricCache[key] = { ...result, savedAt: Date.now(), ...(manual ? { manuallySelected: true } : {}) };
+      state.lyricCache[key] = { ...result, trackDurationMs: track.durationMs, savedAt: Date.now(),
+        ...(result.instrumental ? { instrumentalCheckedAt: result.instrumentalCheckedAt || result.savedAt || Date.now() } : {}),
+        ...(manual ? { manuallySelected: true } : {}) };
       save();
       notify();
       return true;
@@ -93,11 +100,16 @@ export function createLyricSession({ state, request, notify, save, now = () => p
       if (retained) {
         state.lines = retained.lines;
         state.lyricMatch = retained.match;
-        state.lyricStatus = "ready";
+        state.lyricStatus = retained.status;
       } else {
-        state.lyricStatus = "error";
-        const delays = [1_000, 2_500, 6_000, 15_000, 30_000, 60_000];
-        state.lyricRetryAt = now() + delays[Math.min(state.lyricAttempts - 1, delays.length - 1)];
+        const canRecoverQuietly = !manual && state.lyricAttempts === 1
+          && !/\b(?:429|502|503|504)\b|超时|限制访问|权限|没有可用的时间标签|两个歌词源均未找到/.test(state.lyricMessage);
+        state.lyricStatus = canRecoverQuietly ? "recovering" : "error";
+        const delays = /\b(?:429|502|503|504)\b/.test(state.lyricMessage)
+          ? [30_000, 60_000, 120_000, 300_000] : /\b405\b/.test(state.lyricMessage)
+            ? [10_000, 30_000, 60_000, 120_000] : [1_000, 2_500, 6_000, 15_000, 30_000, 60_000];
+        const serverWait = Number(state.lyricMessage.match(/建议等待 (\d+) 秒/)?.[1] || 0) * 1000;
+        state.lyricRetryAt = now() + (canRecoverQuietly ? 650 : Math.max(serverWait, delays[Math.min(state.lyricAttempts - 1, delays.length - 1)]));
       }
       notify();
       return false;
@@ -127,7 +139,7 @@ export function createLyricSession({ state, request, notify, save, now = () => p
       if (key) void load();
       return true;
     }
-    if (key && state.lyricStatus === "error" && (enriched || now() >= state.lyricRetryAt)) void load();
+    if (key && ["error", "recovering"].includes(state.lyricStatus) && (enriched || now() >= state.lyricRetryAt)) void load();
     return false;
   }
 

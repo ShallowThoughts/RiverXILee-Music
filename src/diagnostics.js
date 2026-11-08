@@ -10,6 +10,8 @@ export function lyricProvider(match) {
   if (id.startsWith("netease:")) return "网易云音乐";
   if (id.startsWith("qq:") || /^[a-z0-9]{8,32}$/i.test(id)) return "QQ 音乐";
   if (id.startsWith("local:")) return "本地歌词文件";
+  if (id === "manual:instrumental") return "手动标记纯音乐";
+  if (id === "metadata:instrumental") return "歌曲版本标记";
   return match ? "在线匹配" : "尚未匹配";
 }
 

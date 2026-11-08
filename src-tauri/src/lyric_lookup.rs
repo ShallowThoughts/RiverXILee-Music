@@ -6,28 +6,80 @@ pub(super) async fn json(
     request: reqwest::RequestBuilder,
     provider: &str,
 ) -> Result<Value, String> {
-    let response = request
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| request_error(error, provider))?;
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|error| request_error(error, provider))?;
-    if !value.is_object() {
-        return Err(format!("{provider}歌词接口响应异常，请重试或指定歌词"));
-    }
-    for key in ["code", "retcode"] {
-        if let Some(code) = value[key].as_i64() {
-            if code != 0 && code != 200 {
-                return Err(format!(
-                    "{provider}歌词接口返回错误（{code}），请稍后重试或指定歌词"
-                ));
+    'attempts: for attempt in 0..3 {
+        let copy = request
+            .try_clone()
+            .ok_or_else(|| "歌词请求不能安全重试".to_string())?;
+        let response = copy
+            .send()
+            .await
+            .map_err(|error| request_error(error, provider))?;
+        let status = response.status().as_u16();
+        if matches!(status, 429 | 502 | 503 | 504) {
+            let hint = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok());
+            if let Some(delay) = retry_delay(status, attempt, hint) {
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            let wait = hint
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(30)
+                .clamp(30, 86400);
+            return Err(format!(
+                "{provider}歌词服务暂时不可用（{status}），建议等待 {wait} 秒后重试"
+            ));
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|error| request_error(error, provider))?;
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|error| request_error(error, provider))?;
+        if !value.is_object() {
+            return Err(format!("{provider}歌词接口响应异常，请重试或指定歌词"));
+        }
+        for key in ["code", "retcode"] {
+            if let Some(code) = value[key].as_i64() {
+                if code != 0 && code != 200 {
+                    // This is a provider JSON code, not HTTP Method Not Allowed.
+                    // Retry once without changing methods, cookies or access controls.
+                    if code == 405 && attempt == 0 {
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        continue 'attempts;
+                    }
+                    if matches!(code, 429 | 502 | 503 | 504) {
+                        if let Some(delay) = retry_delay(code as u16, attempt, None) {
+                            tokio::time::sleep(delay).await;
+                            continue 'attempts;
+                        }
+                    }
+                    return Err(format!(
+                        "{provider}歌词接口返回错误（{code}），请稍后重试或指定歌词"
+                    ));
+                }
             }
         }
+        return Ok(value);
     }
-    Ok(value)
+    unreachable!("retry loop always returns on its last attempt")
+}
+
+fn retry_delay(status: u16, attempt: u32, hint: Option<&str>) -> Option<Duration> {
+    if attempt >= 2 || !matches!(status, 429 | 502 | 503 | 504) {
+        return None;
+    }
+    match hint {
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds <= 2)
+            .map(Duration::from_secs),
+        None => Some(Duration::from_millis(250 * (attempt as u64 + 1))),
+    }
 }
 
 fn request_error(error: reqwest::Error, provider: &str) -> String {
@@ -60,6 +112,14 @@ pub(super) async fn first_available(
     primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
     secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,
 ) -> Result<LyricsResult, String> {
+    preferred_with_grace(primary, secondary, Duration::from_secs(4)).await
+}
+
+async fn preferred_with_grace(
+    primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
+    secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,
+    grace: Duration,
+) -> Result<LyricsResult, String> {
     let mut primary = pin!(primary);
     let mut secondary = pin!(secondary);
     // Keep the other provider alive when the first one fails or has no match.
@@ -69,7 +129,13 @@ pub(super) async fn first_available(
         })
         .await;
     let first_error = match first {
-        Ok(Some(result)) => return Ok(result),
+        Ok(Some(result)) if primary_finished => return Ok(result),
+        Ok(Some(fallback)) => {
+            return match tokio::time::timeout(grace, primary.as_mut()).await {
+                Ok(Ok(Some(preferred))) => Ok(preferred),
+                _ => Ok(fallback),
+            };
+        }
         result => result.err(),
     };
     let second = if primary_finished {
@@ -83,6 +149,54 @@ pub(super) async fn first_available(
             "两个歌词源均未找到版本匹配的时间轴歌词，可指定歌词或导入 LRC".to_string()
         })),
     }
+}
+
+pub(super) enum LyricBody {
+    Timed(String, Option<String>),
+    Instrumental,
+}
+
+pub(super) fn make_result(
+    body: LyricBody,
+    song_mid: String,
+    matched_title: String,
+    matched_artist: String,
+) -> LyricsResult {
+    let (lrc, instrumental, translation_lrc) = match body {
+        LyricBody::Timed(text, translation) => (text, false, translation),
+        LyricBody::Instrumental => (String::new(), true, None),
+    };
+    LyricsResult {
+        lrc,
+        song_mid,
+        matched_title,
+        matched_artist,
+        instrumental,
+        match_revision: 2,
+        translation_lrc,
+        translation_revision: 1,
+    }
+}
+
+pub(super) fn instrumental_text(text: &str) -> bool {
+    let lines = text
+        .lines()
+        .map(|line| if line.trim() == "[Instrumental]" { "Instrumental" }
+            else { line.rsplit_once(']').map_or(line, |(_, text)| text).trim() })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    !lines.is_empty()
+        && lines.iter().all(|text| {
+            matches!(
+                *text,
+                "纯音乐，请欣赏"
+                    | "纯音乐,请欣赏"
+                    | "纯音乐，请欣赏。"
+                    | "此歌曲为没有填词的纯音乐，请您欣赏"
+                    | "[Instrumental]"
+                    | "Instrumental"
+            )
+        })
 }
 
 pub(super) fn has_timed_text(lyrics: &str) -> bool {
@@ -158,6 +272,10 @@ mod tests {
             song_mid: id.into(),
             matched_title: "song".into(),
             matched_artist: "artist".into(),
+            instrumental: false,
+            match_revision: 2,
+            translation_lrc: None,
+            translation_revision: 1,
         }
     }
 
@@ -176,9 +294,11 @@ mod tests {
         let result = tauri::async_runtime::block_on(async {
             tokio::time::timeout(
                 Duration::from_secs(1),
-                first_available(std::future::pending(), async {
-                    Ok(Some(lyrics("netease:42")))
-                }),
+                preferred_with_grace(
+                    std::future::pending(),
+                    async { Ok(Some(lyrics("netease:42"))) },
+                    Duration::from_millis(20),
+                ),
             )
             .await
         })
@@ -223,5 +343,81 @@ mod tests {
         assert!(!has_timed_text("<html>temporarily unavailable</html>"));
         assert!(!has_timed_text("[ar:artist]\n[ti:song]"));
         assert!(!has_timed_text("[00:01.00]"));
+    }
+
+    #[test]
+    fn a_faster_fallback_does_not_steal_a_valid_native_result() {
+        let result = tauri::async_runtime::block_on(preferred_with_grace(
+            async {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                Ok(Some(lyrics("qq:preferred")))
+            },
+            async { Ok(Some(lyrics("netease:faster"))) },
+            Duration::from_millis(50),
+        ))
+        .unwrap();
+        assert_eq!(result.song_mid, "qq:preferred");
+    }
+
+    #[test]
+    fn instrumental_markers_are_not_arbitrary_lyric_lines() {
+        assert!(instrumental_text("[00:00.00]纯音乐，请欣赏"));
+        assert!(instrumental_text("纯音乐，请欣赏"));
+        assert!(instrumental_text("[Instrumental]"));
+        assert!(!instrumental_text(
+            "[00:00.00]纯音乐，请欣赏\n[00:10.00]真实的人声歌词"
+        ));
+        assert!(!instrumental_text(""));
+        assert!(!instrumental_text("<html>503</html>"));
+        let result = make_result(
+            LyricBody::Instrumental,
+            "netease:42".into(),
+            "song".into(),
+            "artist".into(),
+        );
+        assert!(result.instrumental && result.lrc.is_empty());
+    }
+
+    #[test]
+    fn retry_policy_is_bounded_and_respects_long_retry_after() {
+        assert_eq!(retry_delay(503, 0, None), Some(Duration::from_millis(250)));
+        assert_eq!(retry_delay(503, 2, None), None);
+        assert_eq!(retry_delay(503, 0, Some("60")), None);
+        assert_eq!(retry_delay(503, 0, Some("1")), Some(Duration::from_secs(1)));
+        assert_eq!(retry_delay(403, 0, None), None);
+    }
+
+    #[test]
+    fn a_temporary_503_recovers_without_becoming_missing_lyrics() {
+        for first in [(503, "<html>busy</html>"), (200, r#"{"code":503}"#), (200, r#"{"code":405}"#)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/lyrics", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                for (status, body) in [first, (200, r#"{"code":200,"ok":true}"#)] {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut buffer = [0; 4096];
+                    let _ = stream.read(&mut buffer);
+                    write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            });
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let value = tauri::async_runtime::block_on(json(client.get(url), "测试源")).unwrap();
+            assert_eq!(value["ok"], true);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn provider_translation_is_preserved_without_synthesizing_missing_text() {
+        let result = make_result(LyricBody::Timed("[00:01.00]Hello".into(), Some("[00:01.00]你好".into())),
+            "qq:42".into(), "song".into(), "artist".into());
+        assert_eq!(result.translation_lrc.as_deref(), Some("[00:01.00]你好"));
+        assert!(!result.instrumental);
+        let missing = make_result(LyricBody::Timed("[00:01.00]Hello".into(), None),
+            "qq:42".into(), "song".into(), "artist".into());
+        assert!(missing.translation_lrc.is_none());
     }
 }

@@ -3,7 +3,9 @@ param([string]$OutputDirectory)
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$releaseVersion = (Get-Content -Raw -LiteralPath (Join-Path $projectRoot "package.json") | ConvertFrom-Json).version
+$packageInfo = Get-Content -Raw -LiteralPath (Join-Path $projectRoot "package.json") | ConvertFrom-Json
+$buildVersion = $packageInfo.version
+$releaseVersion = if ($packageInfo.displayVersion) { $packageInfo.displayVersion } else { $buildVersion }
 $payloadDirectory = Join-Path $projectRoot "src-tauri\target\release\bundle\nsis"
 $installerManifest = Join-Path $projectRoot "installer-ui\src-tauri\Cargo.toml"
 $installerBinary = Join-Path $projectRoot "installer-ui\src-tauri\target\release\riverxilee-installer-center.exe"
@@ -14,13 +16,20 @@ if ((Test-Path -LiteralPath $releaseDirectory) -and (Get-ChildItem -LiteralPath 
 }
 
 Push-Location $projectRoot
+$previousPreviewFlag = $env:VITE_LIQUID_GLASS_PREVIEW
 try {
+    $env:VITE_LIQUID_GLASS_PREVIEW = "0"
     node scripts/collect-notices.mjs
     if ($LASTEXITCODE -ne 0) { throw "Third-party notice collection failed" }
     npm run tauri build
     if ($LASTEXITCODE -ne 0) { throw "Desktop lyrics build failed" }
+    $mainBinary = Join-Path $projectRoot "src-tauri\target\release\riverxilee-desktop-lyrics.exe"
+    $nativeProductName = (Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $projectRoot "src-tauri\tauri.conf.json") | ConvertFrom-Json).productName
+    if ((Get-Item -LiteralPath $mainBinary).VersionInfo.ProductName -ne $nativeProductName) {
+        throw "Refusing to publish an isolated preview as the stable application."
+    }
     $payloadPath = Get-ChildItem -LiteralPath $payloadDirectory -File |
-        Where-Object { $_.Name -like "*_${releaseVersion}_x64-setup.exe" } |
+        Where-Object { $_.Name -like "*_${buildVersion}_x64-setup.exe" } |
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $payloadPath) {
         throw "Silent installer payload was not generated in $payloadDirectory"
@@ -71,5 +80,6 @@ try {
     }
 }
 finally {
+    $env:VITE_LIQUID_GLASS_PREVIEW = $previousPreviewFlag
     Pop-Location
 }

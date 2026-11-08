@@ -58,8 +58,11 @@ function createRow(document, entry, index) {
   const text = document.createElement("span");
   text.className = "lyric-text";
   text.setAttribute("aria-label", entry.text);
+  const original = document.createElement("span");
+  original.className = "lyric-original";
   if (entry.words?.length) {
     text.classList.add("has-word-timing");
+    original.classList.add("has-word-timing");
     for (const [wordIndex, word] of entry.words.entries()) {
       const item = document.createElement("span");
       item.className = "karaoke-word";
@@ -72,7 +75,7 @@ function createRow(document, entry, index) {
       highlight.className = "karaoke-word-highlight";
       highlight.textContent = word.text;
       item.append(base, highlight);
-      text.append(item);
+      original.append(item);
     }
   } else {
     const base = document.createElement("span");
@@ -82,7 +85,15 @@ function createRow(document, entry, index) {
     highlight.className = "current-text-highlight";
     highlight.textContent = entry.text;
     highlight.setAttribute("aria-hidden", "true");
-    text.append(base, highlight);
+    original.append(base, highlight);
+  }
+  text.append(original);
+  if (entry.translation) {
+    const translation = document.createElement("span");
+    translation.className = "lyric-translation";
+    translation.textContent = entry.translation;
+    text.append(translation);
+    text.setAttribute("aria-label", `${entry.text}。译文：${entry.translation}`);
   }
   row.append(text);
   return row;
@@ -143,6 +154,7 @@ export function createLyricView(stack) {
     active = activeIndex;
     settings = display;
     stack.dataset.motion = display.motionEffect;
+    stack.dataset.translation = display.translationMode || "off";
     stack.dataset.layout = "focus";
     const visible = focusLineIndices(lines.length, activeIndex, display.lineCount);
     const flowing = display.motionEffect === "flow";
@@ -166,6 +178,8 @@ export function createLyricView(stack) {
       row.style.setProperty("--line-turn", flowing && spatial && !isCurrent ? `${Math.sign(index - activeIndex) * 1.4}deg` : "0deg");
       const text = row.firstElementChild;
       text.classList.toggle("current-text", isCurrent);
+      text.setAttribute("aria-label", display.translationMode === "bilingual" && lines[index].translation
+        ? `${lines[index].text}。译文：${lines[index].translation}` : lines[index].text);
       text.dataset.effect = display.colorEffect;
       stack.append(row);
     }

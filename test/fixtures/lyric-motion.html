@@ -69,6 +69,12 @@
       view.update(12500, 40000);
       const turn = stack.querySelector(".current-text .karaoke-word").style.getPropertyValue("--word-turn");
       check(parseFloat(turn) !== 0 || matchMedia("(prefers-reduced-motion: reduce)").matches, "演出模式包含独立字词旋转");
+      const bilingual = lines.map((line, index) => ({ ...line, translation: `平台译文 ${index}` }));
+      view.render(bilingual, 3, { ...settings, translationMode: "bilingual", motionEffect: "none" });
+      check(getComputedStyle(stack.querySelector(".current-line .lyric-translation")).display !== "none", "双语模式显示同一行的译文");
+      check(stack.querySelector(".current-line .lyric-translation").textContent === "平台译文 3", "译文跟随原文行而非独立滚动");
+      view.render(bilingual, 3, { ...settings, translationMode: "off", motionEffect: "none" });
+      check(getComputedStyle(stack.querySelector(".current-line .lyric-translation")).display === "none", "关闭翻译不残留空白译文");
       const plain = parseLrc("[00:00.00]A long English line that wraps naturally without losing its font or clipping words\n[00:04.00]한글 가사도 같은 글꼴 흐름으로 표시해\n[00:08.00]中文歌词保持透明与清晰");
       view.render(plain, 0, { ...settings, lineCount: 3 }, { motion: false });
       view.update(2000, 12000);

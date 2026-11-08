@@ -592,12 +592,27 @@ button {
   transition: background-position 120ms linear;
 }
 
-.lyric-text.has-word-timing {
+.lyric-original.has-word-timing {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   column-gap: 0.025em;
 }
+
+.lyric-original { display: grid; min-width: 0; }
+.lyric-translation {
+  display: block;
+  margin-top: 0.24em;
+  color: #e0efeb;
+  font-size: 0.46em;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: 0;
+  text-wrap: balance;
+  text-shadow: 0 1px 3px rgb(0 0 0 / 80%);
+  -webkit-text-stroke: 0;
+}
+.lyrics-stack[data-translation="off"] .lyric-translation { display: none; }
 
 .lyrics-stack[data-motion="flow"] .has-word-timing {
   column-gap: 0.055em;
@@ -865,8 +880,13 @@ button {
 
 .timeline {
   position: relative;
-  height: 4px;
-  overflow: hidden;
+  height: 28px;
+}
+
+.timeline::before {
+  content: "";
+  position: absolute;
+  inset: 12px 0;
   border-radius: 999px;
   background: rgb(214 242 234 / 36%);
   box-shadow: 0 0 0 1px rgb(0 0 0 / 36%);
@@ -874,12 +894,40 @@ button {
 
 .timeline span {
   position: absolute;
-  inset: 0;
-  border-radius: inherit;
+  left: 0;
+  top: 12px;
+  height: 4px;
+  width: 0;
+  border-radius: 999px;
   background: linear-gradient(90deg, #6cdeff, #80f6ca);
-  transform: scaleX(0);
-  transform-origin: left center;
+  pointer-events: none;
 }
+
+.timeline span::after {
+  content: "";
+  position: absolute;
+  right: -4px;
+  top: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ecfff9;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 45%);
+  opacity: 0;
+}
+
+.timeline:has(input:enabled):is(:hover, :focus-within) span::after { opacity: 1; }
+.timeline:focus-within { outline: 2px solid #a1f8dd; outline-offset: 3px; border-radius: 8px; }
+.timeline input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.timeline input:disabled { cursor: not-allowed; }
 
 .toast {
   position: absolute;

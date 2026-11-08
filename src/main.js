@@ -35,9 +35,20 @@ import {
   sanitizeDisplaySettings,
 } from "./settings.js";
 import "./styles.css";
-import { version as APP_VERSION } from "../package.json";
+import "./liquid-glass.css";
+import { initLiquidGlass } from "./liquid-glass.js";
+import { createOnboarding } from "./onboarding.js";
+import { pruneLyricCache, LYRIC_CACHE_LIMIT } from "./lyric-cache.js";
+import { needsTranslationRefresh, translationStatus } from "./translations.js";
+import { createSeekControl } from "./seek-control.js";
+import "./onboarding.css";
+import { displayVersion as APP_VERSION } from "../package.json";
 
 const IS_TAURI = "__TAURI_INTERNALS__" in window;
+const IS_GLASS_PREVIEW = import.meta.env.VITE_LIQUID_GLASS_PREVIEW === "1"
+  || (!IS_TAURI && new URLSearchParams(location.search).get("glass") === "1");
+// Stable and isolated preview share the approved material; isolation remains separate.
+document.body.classList.add("glass-preview");
 const DISPLAY_SETTINGS_KEY = "riverxilee-desktop-lyrics.display.v1";
 const SHORTCUTS_KEY = "riverxilee-desktop-lyrics.shortcuts.v1";
 const PLAYER_KEY = "riverxilee-desktop-lyrics.player.v1";
@@ -45,6 +56,7 @@ const OFFSETS_KEY = "riverxilee-desktop-lyrics.offsets.v1";
 const LYRICS_CACHE_KEY = "riverxilee-desktop-lyrics.cache.v1";
 const DISPLAY_PROFILES_KEY = "riverxilee-desktop-lyrics.profiles.v1";
 const MELODY_KEY = "riverxilee-desktop-lyrics.melody.v1";
+const ONBOARDING_KEY = "riverxilee-desktop-lyrics.onboarding.v1";
 const PREVIEW_LRC = [
   "让音乐，留在看得见的地方",
   "每一句，都有自然的呼吸",
@@ -130,6 +142,7 @@ const state = {
   display: loadDisplaySettings(),
   displayProfiles: sanitizeDisplayProfiles(loadJson(DISPLAY_PROFILES_KEY, "displayProfiles", [])),
   discoveredMelody: loadJson(MELODY_KEY, "discoveredMelody", false) === true,
+  onboardingDismissed: loadJson(ONBOARDING_KEY, "onboardingDismissed", false) === true,
 };
 
 let preferenceSaveQueue = Promise.resolve();
@@ -144,6 +157,7 @@ function persistNativePreferences() {
     lyricCache: state.lyricCache,
     displayProfiles: state.displayProfiles,
     discoveredMelody: state.discoveredMelody,
+    onboardingDismissed: state.onboardingDismissed,
   };
   preferenceSaveQueue = preferenceSaveQueue
     .catch(() => {})
@@ -198,7 +212,7 @@ document.querySelector("#app").innerHTML = `
       <div class="identity" data-tauri-drag-region>
         <span class="status-indicator" id="status-indicator" aria-hidden="true"></span>
         <div class="identity-copy" data-tauri-drag-region>
-          <span class="app-name">RiverXILee桌面歌词</span>
+          <span class="app-name">RiverXILee桌面歌词${IS_GLASS_PREVIEW ? " · 液态玻璃预览" : ""}</span>
           <span class="track-meta" id="track-meta">等待连接播放器</span>
         </div>
       </div>
@@ -233,7 +247,7 @@ document.querySelector("#app").innerHTML = `
 
         <div class="timeline-copy">
           <span id="position-text">00:00</span>
-          <div class="timeline" aria-hidden="true"><span id="timeline-progress"></span></div>
+          <div class="timeline"><span id="timeline-progress" aria-hidden="true"></span><input id="timeline-seek" type="range" min="0" max="1" step="1000" value="0" disabled aria-label="歌曲播放进度"></div>
           <span id="duration-text">00:00</span>
         </div>
 
@@ -261,7 +275,7 @@ document.querySelector("#app").innerHTML = `
         </button>
         <div>
           <h2 id="settings-page-title" tabindex="-1">设置</h2>
-          <span>即时预览 · 自动保存 · v${APP_VERSION}</span>
+          <span>${IS_GLASS_PREVIEW ? "液态玻璃独立预览" : "即时预览 · 自动保存"} · v${APP_VERSION}</span>
         </div>
         <button class="icon-button quiet" id="settings-close-button" type="button" aria-label="关闭设置">
           <i class="ph ph-x" aria-hidden="true"></i>
@@ -325,6 +339,11 @@ document.querySelector("#app").innerHTML = `
             <span id="font-selected-label"></span><i class="ph ph-caret-down" aria-hidden="true"></i>
           </button>
         </div>
+        <label class="setting-control setting-control-wide">
+          <span>翻译模式</span>
+          <select data-setting="translationMode"><option value="off">仅显示原文</option><option value="bilingual">原文＋平台译文</option></select>
+          <small class="setting-help" id="translation-status">仅使用当前歌词版本自带的译文，无译文时保留原文</small>
+        </label>
        </div>
 
        <div class="color-editor">
@@ -383,6 +402,11 @@ document.querySelector("#app").innerHTML = `
             <select id="player-source-select"><option value="">自动选择正在播放的平台</option></select>
           </label>
           <div class="sync-row">
+            <div class="sync-copy"><strong>网易云进度增强控制</strong><span id="netease-control-status" role="status">默认关闭 · 开启前需两次确认并重启网易云</span></div>
+            <button class="text-button" id="netease-control-button" type="button">临时启用</button>
+          </div>
+          <p class="setting-help">仅限本次运行，不修改客户端文件。开启会开放本机调试端口，存在本机访问风险；退出桌面歌词不会关闭端口，需恢复普通模式或完全退出网易云后正常重开。</p>
+          <div class="sync-row">
             <div class="sync-copy"><strong>本歌曲时间偏移</strong><span id="offset-status">0.0 秒</span></div>
             <div class="stepper" aria-label="歌词时间偏移">
               <button class="text-button" id="lyrics-earlier-button" type="button">提前 0.5 秒</button>
@@ -407,6 +431,7 @@ document.querySelector("#app").innerHTML = `
               <button class="text-button" id="song-link-button" type="button">获取并绑定</button>
               <button class="text-button" id="lyric-import-button" type="button">导入 LRC 歌词</button>
               <button class="text-button" id="lyric-auto-button" type="button">恢复自动匹配</button>
+              <button class="text-button" id="lyric-instrumental-button" type="button">本首设为纯音乐</button>
             </div>
             <p class="setting-help">手动选择会绑定到当前歌曲并保存在本地。支持带时间标签的 LRC、YRC、QRC，不需要音频文件。</p>
             <input id="lyric-file-input" type="file" accept=".lrc,.yrc,.qrc,text/plain" hidden />
@@ -433,6 +458,7 @@ document.querySelector("#app").innerHTML = `
         <div class="settings-footer settings-actions">
           <button class="text-button" id="feedback-button" type="button">问题反馈</button>
           <button class="text-button" id="update-check-button" type="button">检查更新</button>
+          <button class="text-button" id="onboarding-replay-button" type="button">新手引导</button>
         </div>
       </section>
 
@@ -473,7 +499,7 @@ document.querySelector("#app").innerHTML = `
       </button>
     </section>
 
-    <div class="toast" id="toast" role="status"></div>
+    <div class="toast" id="toast" role="status"><span id="toast-message"></span></div>
     <dialog class="melody-dialog" id="melody-dialog" aria-labelledby="melody-title" aria-describedby="melody-message">
       <button class="icon-button melody-close" id="melody-close" type="button" aria-label="关闭隐藏旋律" autofocus><i class="ph ph-x" aria-hidden="true"></i></button>
       <div class="melody-art" aria-hidden="true">
@@ -571,7 +597,7 @@ function setUpdateBannerVisible(visible) {
 }
 
 async function checkForUpdates({ manual = false } = {}) {
-  if (!IS_TAURI || updateCheckInFlight) return;
+  if (!IS_TAURI || IS_GLASS_PREVIEW || updateCheckInFlight) return;
   if (updateDownloadInFlight || downloadedInstallerPath) {
     if (manual) showToast(downloadedInstallerPath ? "更新包已准备好，请点击立即安装" : "更新正在下载，请稍候");
     return;
@@ -619,6 +645,7 @@ function syncSettingsPanel() {
   fontPicker.sync();
   for (const input of colorInputs) input.value = state.display.color[input.dataset.colorChannel];
   elements.colorPicker.value = rgbToHex(state.display.color);
+  document.querySelector("#translation-status").textContent = translationStatus(state);
 
   const values = {
     lineCount: `${state.display.lineCount} 行`,
@@ -702,7 +729,7 @@ function setButtonIcon(button, iconName, filled = false) {
 }
 
 function showToast(message, timeout = 2_600) {
-  elements.toast.textContent = message;
+  document.querySelector("#toast-message").textContent = message;
   elements.toast.classList.add("visible");
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => elements.toast.classList.remove("visible"), timeout);
@@ -712,7 +739,7 @@ function syncTrackTools() {
   const offsetSeconds = state.lyricOffsetMs / 1_000;
   elements.offsetStatus.textContent = `${offsetSeconds > 0 ? "+" : ""}${offsetSeconds.toFixed(1)} 秒`;
   const cacheCount = Object.keys(state.lyricCache).length;
-  elements.cacheStatus.textContent = cacheCount ? `已缓存 ${cacheCount} 首` : "尚无缓存";
+  elements.cacheStatus.textContent = cacheCount ? `已缓存 ${cacheCount} 首 · 自动上限 ${LYRIC_CACHE_LIMIT} 首，手动绑定保留` : `自动缓存最多 ${LYRIC_CACHE_LIMIT} 首`;
   elements.playerSource.value = state.preferredSource;
   elements.playerModeStatus.textContent = state.preferredSource
     ? `已锁定 ${platformName(state.preferredSource)}`
@@ -786,19 +813,11 @@ function adjustLyricOffset(delta, absolute = false) {
 }
 
 function saveLyricsCache() {
-  const entries = Object.entries(state.lyricCache)
-    .sort(([, left], [, right]) => (right.savedAt ?? 0) - (left.savedAt ?? 0))
-    .slice(0, 80);
-  state.lyricCache = Object.fromEntries(entries);
+  state.lyricCache = pruneLyricCache(state.lyricCache);
   try {
     localStorage.setItem(LYRICS_CACHE_KEY, JSON.stringify(state.lyricCache));
   } catch {
-    state.lyricCache = Object.fromEntries(entries.slice(0, 30));
-    try {
-      localStorage.setItem(LYRICS_CACHE_KEY, JSON.stringify(state.lyricCache));
-    } catch {
-      state.lyricCache = {};
-    }
+    // WebView quota must never truncate the desktop's native preferences/cache.
   }
   syncTrackTools();
   persistNativePreferences();
@@ -851,12 +870,19 @@ function setStageMessage(title, detail = "") {
 }
 
 function renderLyricWindow(activeIndex) {
-  if (state.lyricStatus === "loading") {
-    setStageMessage("正在寻找歌词", `${state.title} · ${state.artist}`);
+  if (state.lyricStatus === "instrumental") {
+    setStageMessage("纯音乐，请欣赏", "已停止自动匹配；如判断不符，可在播放与同步中手动指定歌词");
+    return;
+  }
+  if (["loading", "recovering"].includes(state.lyricStatus)) {
+    setStageMessage(state.lyricStatus === "recovering" ? "正在重新获取歌词" : "正在寻找歌词", `${state.title} · ${state.artist}`);
     return;
   }
   if (state.lyricStatus === "error") {
-    setStageMessage("歌词暂未获取，将自动重试", state.lyricMessage || "可尝试其他歌词版本或导入 LRC");
+    const serviceBusy = /\b(?:429|502|503|504)\b/.test(state.lyricMessage);
+    const noMatch = state.lyricMessage.includes("两个歌词源均未找到");
+    setStageMessage(serviceBusy ? "歌词服务暂时不可用，稍后重试" : noMatch ? "暂未找到匹配的歌词" : "歌词暂未获取，将自动重试",
+      state.lyricMessage || "可尝试其他歌词版本或导入 LRC");
     const actions = document.createElement("div");
     actions.className = "empty-actions";
     const retry = document.createElement("button");
@@ -912,6 +938,7 @@ const lyricSession = createLyricSession({
   save: saveLyricsCache,
   notify() {
     renderLyricWindow(findActiveLine(state.lines, estimatedPosition() - state.lyricOffsetMs));
+    syncSettingsPanel();
     renderDiagnostics();
   },
 });
@@ -933,6 +960,7 @@ async function pollMedia() {
       && state.title === snapshot.title
       && state.artist === snapshot.artist;
     state.connected = snapshot.connected;
+    state.canSeek = snapshot.canSeek === true;
     state.source = snapshot.source;
     state.title = snapshot.title;
     state.artist = snapshot.artist;
@@ -990,6 +1018,22 @@ async function pollMedia() {
   }
 }
 
+const seekControl = createSeekControl({
+  input: document.querySelector("#timeline-seek"), fill: elements.progress, time: elements.position, formatTime,
+  async seek(positionMs, key) {
+    if (state.trackKey !== key) return;
+    if (!IS_TAURI) {
+      state.positionMs = positionMs;
+      state.syncedAt = performance.now();
+      return;
+    }
+    const accepted = await invoke("seek_media", { positionMs, source: state.source, title: state.title, artist: state.artist });
+    if (!accepted) throw new Error("播放器未接受进度跳转，请在音乐软件内调整");
+    setTimeout(pollMedia, 160);
+  },
+  error(reason) { showToast(String(reason?.message || reason).replace(/^Error: /, "")); },
+});
+
 function animationFrame() {
   let position = estimatedPosition();
   if (!IS_TAURI && state.durationMs > 0 && position >= state.durationMs) {
@@ -997,10 +1041,9 @@ function animationFrame() {
     state.positionMs = position;
     state.syncedAt = performance.now();
   }
-  elements.position.textContent = formatTime(position);
   elements.duration.textContent = formatTime(state.durationMs);
-  const trackProgress = state.durationMs > 0 ? position / state.durationMs : 0;
-  elements.progress.style.transform = `scaleX(${Math.min(1, Math.max(0, trackProgress))})`;
+  seekControl.update({ key: state.trackKey, positionMs: position, durationMs: state.durationMs,
+    enabled: state.connected && state.durationMs > 0 && (!IS_TAURI || state.canSeek === true) && !state.locked });
 
   if (state.connected && state.lyricStatus === "ready") {
     const lyricPosition = position - state.lyricOffsetMs;
@@ -1077,7 +1120,11 @@ for (const tab of document.querySelectorAll("[data-settings-tab]")) {
 }
 
 for (const input of settingInputs) {
-  input.addEventListener("input", () => updateSettingValue(input.dataset.setting, input.value));
+  input.addEventListener("input", () => {
+    updateSettingValue(input.dataset.setting, input.value);
+    if (input.dataset.setting === "translationMode" && input.value === "bilingual"
+      && needsTranslationRefresh(state.lyricMatch)) lyricSession.retry();
+  });
 }
 
 for (const input of colorInputs) {
@@ -1278,6 +1325,46 @@ document.querySelector("#reset-window-button").addEventListener("click", async (
   }
 });
 
+const neteaseControlButton = document.querySelector("#netease-control-button");
+const neteaseControlStatus = document.querySelector("#netease-control-status");
+let neteaseNeedsRestart = false;
+let neteaseControlBusy = false;
+function paintNeteaseControl(status) {
+  neteaseNeedsRestart = status.needsRestart;
+  neteaseControlButton.textContent = status.needsRestart ? "关闭并恢复普通模式" : "临时启用";
+  neteaseControlStatus.textContent = status.enabled
+    ? "本次已启用 · 退出桌面歌词不会关闭网易云调试端口"
+    : status.needsRestart ? "尚未就绪 · 请恢复普通模式后重试" : "默认关闭 · 开启前需两次确认并重启网易云";
+}
+async function refreshNeteaseControl() {
+  if (!IS_TAURI || neteaseControlBusy) return;
+  try { paintNeteaseControl(await invoke("netease_control_status")); }
+  catch { neteaseControlStatus.textContent = "暂时无法读取增强控制状态，请稍后重试"; }
+}
+neteaseControlButton.disabled = !IS_TAURI;
+neteaseControlButton.addEventListener("click", async () => {
+  if (!IS_TAURI || neteaseControlBusy) return;
+  neteaseControlBusy = true;
+  neteaseControlButton.disabled = true;
+  neteaseControlStatus.textContent = "等待确认或重启网易云，请稍候…";
+  try {
+    paintNeteaseControl(await invoke("configure_netease_control", { enable: !neteaseNeedsRestart }));
+    await pollMedia();
+  } catch (error) {
+    await refreshNeteaseControlAfterError();
+    neteaseControlStatus.textContent = String(error);
+    showToast("网易云增强控制未完成，请查看播放与同步中的说明");
+  } finally {
+    neteaseControlBusy = false;
+    neteaseControlButton.disabled = false;
+  }
+});
+async function refreshNeteaseControlAfterError() {
+  try { paintNeteaseControl(await invoke("netease_control_status")); } catch { /* Keep the last known restore action. */ }
+}
+refreshNeteaseControl();
+elements.settings.addEventListener("click", refreshNeteaseControl);
+
 elements.playerSource.addEventListener("change", () => {
   state.preferredSource = elements.playerSource.value;
   localStorage.setItem(PLAYER_KEY, state.preferredSource);
@@ -1428,10 +1515,18 @@ document.querySelector("#lyric-auto-button").addEventListener("click", () => {
   lyricSession.retry();
   showToast("正在重新自动匹配当前歌曲");
 });
+document.querySelector("#lyric-instrumental-button").addEventListener("click", async () => {
+  if (!state.trackKey) { showToast("播放歌曲后才能标记纯音乐"); return; }
+  const title = state.title, artist = state.artist;
+  const applied = await lyricSession.bind(async () => ({ lrc: "", instrumental: true,
+    songMid: "manual:instrumental", matchedTitle: title, matchedArtist: artist }));
+  if (applied) { syncTrackTools(); showToast("本首已标记为纯音乐；可用「恢复自动匹配」撤销"); }
+});
+
 window.addEventListener("online", () => { if (state.lyricStatus === "error") lyricSession.retry(); });
 
 elements.autostart.addEventListener("change", async () => {
-  if (!IS_TAURI) return;
+  if (!IS_TAURI || IS_GLASS_PREVIEW) return;
   elements.autostart.disabled = true;
   try {
     if (elements.autostart.checked) await enableAutostart();
@@ -1458,14 +1553,14 @@ function syncShortcutInputs() {
   }
   for (const button of shortcutClearButtons) button.disabled = !state.shortcuts[button.dataset.clearShortcut];
   const lockShortcut = state.shortcuts.toggleLock;
-  elements.lock.title = lockShortcut && !unavailableShortcutActions.has("toggleLock") ? `锁定 · ${lockShortcut} 解锁` : "锁定 · 从系统托盘解锁";
+  elements.lock.title = IS_GLASS_PREVIEW ? "设计预览不启用鼠标穿透锁定" : lockShortcut && !unavailableShortcutActions.has("toggleLock") ? `锁定 · ${lockShortcut} 解锁` : "锁定 · 从系统托盘解锁";
 }
 
 async function registerShortcuts({ announce = false, changedAction = "" } = {}) {
   localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(state.shortcuts));
   persistNativePreferences();
   syncShortcutInputs();
-  if (!IS_TAURI) return true;
+  if (!IS_TAURI || IS_GLASS_PREVIEW) return true;
   try {
     const shortcuts = Object.fromEntries(Object.entries(state.shortcuts).filter(([, value]) => value));
     const unavailable = await invoke("set_global_shortcuts", { shortcuts });
@@ -1615,6 +1710,14 @@ document.querySelector("#update-dismiss-button").addEventListener("click", () =>
 });
 
 async function setLocked(locked) {
+  if (onboarding.active && locked) {
+    showToast("完成或跳过新手引导后，再开启鼠标穿透锁定");
+    return;
+  }
+  if (IS_GLASS_PREVIEW && locked) {
+    showToast("设计预览未注册快捷键，暂不启用鼠标穿透锁定");
+    return;
+  }
   setSettingsOpen(false);
   state.locked = locked;
   elements.shell.classList.toggle("is-locked", locked);
@@ -1682,7 +1785,7 @@ if (IS_TAURI) {
   registerShortcuts();
   pollMedia();
   refreshMediaSources();
-  isAutostartEnabled().then((enabled) => { elements.autostart.checked = enabled; }).catch(() => {});
+  if (!IS_GLASS_PREVIEW) isAutostartEnabled().then((enabled) => { elements.autostart.checked = enabled; }).catch(() => {});
   setInterval(pollMedia, 650);
   setInterval(refreshMediaSources, 4_000);
   setTimeout(checkForUpdates, 3_500);
@@ -1713,3 +1816,50 @@ refreshDisplayProfiles();
 setSettingsOpen(false);
 renderLyricWindow(-1);
 requestAnimationFrame(animationFrame);
+
+let tourPreviousPage = null;
+const onboarding = createOnboarding({
+  prepare(page) {
+    if (tourPreviousPage === null) tourPreviousPage = state.settingsOpen
+      ? document.querySelector("#settings-back-button").dataset.from || "home" : "closed";
+    setSettingsOpen(Boolean(page));
+    if (page) showSettingsPage(page);
+  },
+  restore() {
+    setSettingsOpen(tourPreviousPage !== "closed");
+    if (tourPreviousPage !== "closed") showSettingsPage(tourPreviousPage || "home");
+    tourPreviousPage = null;
+  },
+  dismiss() {
+    state.onboardingDismissed = true;
+    try { localStorage.setItem(ONBOARDING_KEY, "true"); } catch { /* Native preferences still retain this choice. */ }
+    persistNativePreferences();
+  },
+  lockDescription() {
+    if (IS_GLASS_PREVIEW) return "正式版可锁定窗口并开启鼠标穿透，让歌词留在桌面上。这份独立设计预览未注册全局快捷键，因此暂不启用锁定。";
+    const shortcut = state.shortcuts.toggleLock;
+    const unlock = shortcut && !unavailableShortcutActions.has("toggleLock") ? `按 ${shortcut} 解锁，也可从系统托盘解锁。` : "从系统托盘选择「锁定或解锁」返回操作。";
+    return `锁定后，点击会穿过歌词窗口。${unlock}快捷键可在设置中自定义或清除。引导期间不会启用锁定。`;
+  },
+});
+document.querySelector("#onboarding-replay-button").addEventListener("click", () => onboarding.start());
+if (!state.onboardingDismissed) setTimeout(() => {
+  if (!state.onboardingDismissed && state.visible && !state.locked) onboarding.start();
+}, 3_000);
+
+const cleanupGlass = initLiquidGlass([
+  document.querySelector("#control-bar"), elements.settingsPanel, elements.updateBanner,
+  elements.toast, document.querySelector("#font-picker-popup"), onboarding.card,
+]);
+window.addEventListener("pagehide", cleanupGlass, { once: true });
+if (import.meta.hot) import.meta.hot.dispose(cleanupGlass);
+
+if (IS_GLASS_PREVIEW) {
+  elements.autostart.disabled = true;
+  elements.lock.disabled = true;
+  elements.autostart.closest("label").title = "独立设计预览不修改开机启动";
+  document.querySelector("#update-check-button").disabled = true;
+  document.querySelector("#update-check-button").title = "独立设计预览不接管正式更新";
+  for (const input of shortcutInputs) { input.disabled = true; input.title = "设计预览不注册全局快捷键"; }
+  for (const button of shortcutClearButtons) button.disabled = true;
+}

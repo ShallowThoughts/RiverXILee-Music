@@ -1,0 +1,23 @@
+{
+  "productName": "RiverXILee Liquid Glass Preview",
+  "identifier": "top.lxixi.riverxilee-desktop-lyrics.glasspreview",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "RiverXILee桌面歌词 · 液态玻璃预览",
+        "width": 1080,
+        "height": 600,
+        "minWidth": 640,
+        "minHeight": 360,
+        "center": true,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": { "active": false }
+}

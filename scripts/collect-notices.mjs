@@ -8,6 +8,9 @@ const notices = [
   "RiverXILee Desktop Lyrics - Third-party notices",
   "The application is GPL-3.0-only. The dependencies below retain their own licenses.",
   "This inventory includes Windows dependencies and build tools from both Cargo graphs.",
+  "Local QQ/NetEase player compatibility protocol references: BrimDeck (MoFeng2223), Apache-2.0.",
+  "Source: https://github.com/MoFeng2223/BrimDeck (Native/QqMediaConnection, NeteaseSource, NeteaseBridgeScript).",
+  "RiverXILee implementations are limited to media metadata and progress control; no account APIs or persistent client patches are included.",
 ];
 const seen = new Set();
 async function collect(label, folder, metadata) {

@@ -26,6 +26,24 @@ test("cold cache clears the previous song immediately and fetches the new lyrics
   assert.ok(state.lyricCache[lyricTrackKey(track("从未播放的新歌"))]);
 });
 
+test("bilingual mode refreshes legacy QQ null translations but reuses the upgraded cache", async () => {
+  let calls = 0;
+  const { state, session } = harness(() => {
+    calls++;
+    return { ...result("Hello"), songMid: "002sXtHN37Aqki", translationLrc: "[00:00.00]你好", translationRevision: 1 };
+  });
+  state.display = { translationMode: "bilingual" };
+  const song = track("翻译歌曲", { source: "QQMusic.exe" });
+  state.lyricCache[lyricTrackKey(song)] = { ...result("Hello"), songMid: "002sXtHN37Aqki", translationLrc: null };
+  session.update(song); await flush();
+  assert.equal(calls, 1);
+  assert.equal(state.lines[0].translation, "你好");
+  session.update({ connected: false });
+  session.update(song); await flush();
+  assert.equal(calls, 1);
+  assert.equal(state.lyricFromCache, true);
+});
+
 test("a late ID or a changing duration does not restart a successful load", async () => {
   let calls = 0;
   const { state, session } = harness(() => { calls += 1; return result("正常歌词"); });
@@ -96,4 +114,96 @@ test("switching songs while importing never binds the file to the next song", as
   assert.equal(await imported, false);
   assert.equal(state.lines[0].text, "自动歌词");
   assert.equal(state.lyricCache[lyricTrackKey(track("第二首"))].manuallySelected, undefined);
+});
+
+test("confirmed instrumentals stop automatic searches and their negative cache is reusable", async () => {
+  let calls = 0;
+  const { state, session, advance } = harness(() => { calls++; return { lrc: "", instrumental: true, matchedTitle: "曲目", matchRevision: 2 }; });
+  session.update(track("曲目")); await flush();
+  assert.equal(state.lyricStatus, "instrumental");
+  assert.equal(state.lines.length, 0);
+  advance(); session.update(track("曲目")); await flush();
+  assert.equal(calls, 1);
+  session.update(track("另一首")); await flush();
+  session.update(track("曲目")); await flush();
+  assert.equal(calls, 2);
+  assert.equal(state.lyricFromCache, true);
+  assert.equal(state.lyricStatus, "instrumental");
+  assert.equal(await session.bind(async () => ({ lrc: "无效的手动歌词" })), false);
+  assert.equal(state.lyricStatus, "instrumental");
+});
+
+test("503 is not cached as instrumental and retries respect server cooldown", async () => {
+  let calls = 0;
+  const { state, session, advance } = harness(() => { calls++; throw new Error("QQ 音乐歌词服务暂时不可用（503），建议等待 60 秒后重试"); });
+  session.update(track("新歌")); await flush();
+  assert.equal(state.lyricStatus, "error");
+  assert.equal(state.lyricRetryAt, 60000);
+  session.update(track("新歌")); await flush();
+  assert.equal(calls, 1);
+  assert.equal(Object.keys(state.lyricCache).length, 0);
+  advance(); session.update(track("新歌")); await flush();
+  assert.equal(calls, 2);
+});
+
+test("outdated automatic matches are replaced but old manual bindings remain", async () => {
+  let calls = 0;
+  const { state, session } = harness(() => { calls++; return { ...result("新匹配"), matchRevision: 2, matchedTitle: "新歌" }; });
+  state.lyricCache[lyricTrackKey(track("新歌"))] = { ...result("错配"), matchedTitle: "新歌" };
+  session.update(track("新歌")); await flush();
+  assert.equal(calls, 1);
+  assert.equal(state.lines[0].text, "新匹配");
+  state.lyricCache[lyricTrackKey(track("手动"))] = { ...result("我的选择"), matchedTitle: "手动", manuallySelected: true };
+  session.update(track("手动")); await flush();
+  assert.equal(calls, 1);
+  assert.equal(state.lines[0].text, "我的选择");
+});
+
+test("a first 405 recovers without publishing an error state, but persistent failures stay visible", async () => {
+  let calls = 0;
+  const seen = [];
+  const { state, session, advance } = harness(() => {
+    if (++calls === 1) throw new Error("网易云音乐歌词接口返回错误（405）");
+    return result("恢复成功");
+  }, { notify() { if (state) seen.push(state.lyricStatus); } });
+  session.update(track("新歌")); await flush();
+  assert.equal(state.lyricStatus, "recovering");
+  advance(); session.update(track("新歌")); await flush();
+  assert.equal(state.lyricStatus, "ready");
+  assert.equal(seen.includes("error"), false);
+  const persistent = harness(() => { throw new Error("网易云音乐歌词接口返回错误（405）"); });
+  persistent.session.update(track("失败")); await flush();
+  persistent.advance(); persistent.session.update(track("失败")); await flush();
+  assert.equal(persistent.state.lyricStatus, "error");
+  assert.ok(persistent.state.lyricRetryAt > 10000);
+});
+
+test("a song ID arriving during quiet recovery is used and switching songs cancels that recovery", async () => {
+  const ids = [];
+  const { state, session } = harness((song) => {
+    ids.push(song.trackId);
+    if (!song.trackId) throw new Error("网易云音乐歌词接口返回错误（405）");
+    return result("精确歌曲");
+  });
+  session.update(track("新歌")); await flush();
+  assert.equal(state.lyricStatus, "recovering");
+  session.update(track("新歌", { trackId: "42" })); await flush();
+  assert.equal(state.lyricStatus, "ready");
+  assert.deepEqual(ids, [undefined, "42"]);
+  session.update(track("下一首", { trackId: "43" })); await flush();
+  assert.deepEqual(ids, [undefined, "42", "43"]);
+  assert.equal(state.trackKey, lyricTrackKey(track("下一首")));
+});
+
+test("translated lyrics stay bound to their own result across caching and switching songs", async () => {
+  const { state, session } = harness((song) => song.title === "英文"
+    ? { ...result("Hello"), translationLrc: "[00:00.00]你好\n[00:10.00]下一句" }
+    : result("另一首"));
+  session.update(track("英文")); await flush();
+  assert.equal(state.lines[0].translation, "你好");
+  session.update(track("其他")); await flush();
+  assert.equal(state.lines[0].translation, undefined);
+  session.update(track("英文")); await flush();
+  assert.equal(state.lyricFromCache, true);
+  assert.equal(state.lines[0].translation, "你好");
 });

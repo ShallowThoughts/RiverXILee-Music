@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>玻璃材质与进度交互验证</title>
+<link rel="stylesheet" href="/src/styles.css">
+<link rel="stylesheet" href="/src/liquid-glass.css">
+<style>
+  body { overflow: auto; color: #effaf7; font: 15px/1.6 system-ui; }
+  main { min-height: 100vh; display: grid; grid-template-rows: 1fr 1fr; }
+  section { min-height: 280px; display: grid; align-content: center; justify-items: center; gap: 28px; padding: 32px 20px; }
+  .light { color: #143941; background: linear-gradient(135deg, #d2e9ec, #82b7bf 45%, #e4d9c6); }
+  .dark { background: linear-gradient(135deg, #14272c, #34596a 58%, #182c33); }
+  h1, p { margin: 0; font-size: 16px; font-weight: 550; }
+  .control-bar { opacity: 1; transform: none; grid-template-columns: 38px minmax(100px, 1fr) 38px; }
+  .play-button { border: 0; border-radius: 50%; width: 36px; height: 36px; }
+  .glass-sample { position: relative; overflow: hidden; border-radius: 16px; padding: 16px 24px; color: #f0faf8; }
+</style>
+<body class="glass-preview">
+<main>
+  <section class="light">
+    <h1>明亮背景 · 本地材质预览，不控制真实播放器</h1>
+    <div class="control-bar">
+      <button class="icon-button play-button" aria-label="播放预览"><i class="ph-fill ph-play" aria-hidden="true"></i></button>
+      <div class="timeline-copy"><span id="time">01:00</span><div class="timeline"><span id="fill" aria-hidden="true"></span><input id="seek" type="range" min="0" max="240000" step="1000" aria-label="歌曲播放进度"></div><span>04:00</span></div>
+      <button class="icon-button" aria-label="预览选项"><i class="ph ph-dots-three" aria-hidden="true"></i></button>
+    </div>
+    <div class="glass-sample"><span id="result" role="status">拖动进度条，松开后提交；方向键每次调整 1 秒</span></div>
+  </section>
+  <section class="dark">
+    <p>深色背景 · 保留柔和色彩与内亮边，不模糊控件文字</p>
+    <div class="control-bar">
+      <button class="icon-button play-button" aria-label="深色背景播放预览"><i class="ph-fill ph-play" aria-hidden="true"></i></button>
+      <div class="timeline-copy"><span>02:32</span><div class="timeline"><span style="width:63%" aria-hidden="true"></span></div><span>04:00</span></div>
+      <button class="icon-button" aria-label="深色背景选项"><i class="ph ph-dots-three" aria-hidden="true"></i></button>
+    </div>
+  </section>
+</main>
+<script type="module">
+  import "@phosphor-icons/web/regular";
+  import "@phosphor-icons/web/fill";
+  import { initLiquidGlass } from "/src/liquid-glass.js";
+  import { createSeekControl } from "/src/seek-control.js";
+  initLiquidGlass([...document.querySelectorAll(".control-bar, .glass-sample")]);
+  const time = ms => `${String(Math.floor(ms / 60000)).padStart(2, "0")}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+  const snapshot = { key: "demo", positionMs: 60000, durationMs: 240000, enabled: true };
+  const control = createSeekControl({ input: document.querySelector("#seek"), fill: document.querySelector("#fill"), time: document.querySelector("#time"), formatTime: time,
+    async seek(positionMs) { snapshot.positionMs = positionMs; control.update(snapshot); document.querySelector("#result").textContent = `预览已跳转到 ${time(positionMs)} · 未控制真实播放器`; },
+    error(error) { document.querySelector("#result").textContent = error.message; } });
+  control.update(snapshot);
+</script>
+</body>
+</html>

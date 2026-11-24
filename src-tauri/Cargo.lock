@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "riverxilee-desktop-lyrics"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "base64 0.22.1",
  "futures-lite",

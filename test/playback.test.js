@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { playbackAnchor, playbackPosition, reconcilePlaybackAnchor } from "../src/playback.js";
+import { playbackAnchor, playbackPosition, readPlaybackSample, reconcilePlaybackAnchor } from "../src/playback.js";
 
 const epoch = 1_780_000_000_000;
 function snapshot(overrides = {}) {
@@ -19,6 +19,25 @@ test("compensates stale timeline position and IPC delay", () => {
   const anchor = playbackAnchor(snapshot(), 100, epoch + 5_050);
   assert.equal(anchor.positionMs, 65_050);
   assert.equal(playbackPosition(anchor, 600), 65_550);
+});
+
+test("a slow media poll anchors at receipt, not before the player took the sample", async () => {
+  let clock = 1_000;
+  const sample = await readPlaybackSample(async () => {
+    await Promise.resolve();
+    clock = 1_800;
+    return snapshot({ positionMs: 12_000, capturedAtMs: epoch + 1_750, timelineUpdatedAtMs: epoch + 1_750 });
+  }, () => clock, () => epoch + clock);
+  const anchor = playbackAnchor(sample.snapshot, sample.receivedAt, sample.receivedAtEpoch);
+  assert.equal(playbackPosition(anchor, clock), 12_050);
+});
+
+test("a playback rate change takes effect without retaining drift from the previous rate", () => {
+  const current = { positionMs: 60_000, durationMs: 200_000, isPlaying: true, playbackRate: 1, syncedAt: 1_000 };
+  const result = reconcilePlaybackAnchor(current, snapshot({ positionMs: 61_300, playbackRate: 1.5,
+    timelineUpdatedAtMs: epoch + 2_000 }), 2_000, epoch + 2_000);
+  assert.equal(result.correction, "snap");
+  assert.equal(result.anchor.positionMs, 61_300);
 });
 
 test("polling the same cached timeline does not rewind the clock", () => {

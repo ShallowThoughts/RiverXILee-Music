@@ -9,10 +9,10 @@ import { disable as disableAutostart, enable as enableAutostart, isEnabled as is
 import { buildDiagnosticReport, lyricProvider, lyricTimingType } from "./diagnostics.js";
 import { findActiveLine, parseLrc } from "./lyrics.js";
 import { createLyricView } from "./lyric-view.js";
-import { createLyricSession, legacyTrackKey, matchingLegacyKeys } from "./lyric-session.js";
+import { createLyricSession, legacyTrackKey, lyricTrackKey, matchingLegacyKeys } from "./lyric-session.js";
 import { parseSongLink, readLyricFile } from "./lyric-links.js";
 import { createFontPicker, resolveInstalledFont } from "./font-picker.js";
-import { playbackAnchor, playbackPosition, reconcilePlaybackAnchor } from "./playback.js";
+import { playbackAnchor, playbackPosition, readPlaybackSample, reconcilePlaybackAnchor } from "./playback.js";
 import { updateErrorMessage, updateProgressView } from "./update-ui.js";
 import { platformName, resolvePreferredSource } from "./media-sources.js";
 import {
@@ -951,16 +951,14 @@ async function pollMedia() {
   if (!IS_TAURI || mediaPollInFlight) return;
   mediaPollInFlight = true;
   try {
-    const receivedAt = performance.now();
-    const receivedAtEpoch = Date.now();
-    const snapshot = await invoke("get_media_snapshot", {
-      preferredSource: state.preferredSource || null,
-    });
+    const preferredSource = state.preferredSource || null;
+    const { snapshot, receivedAt, receivedAtEpoch } = await readPlaybackSample(() => invoke("get_media_snapshot", { preferredSource }));
+    if (preferredSource !== (state.preferredSource || null)) return;
     const wasConnected = state.connected;
+    const nextTrackKey = lyricTrackKey(snapshot);
     const sameTrack = wasConnected
       && state.source === snapshot.source
-      && state.title === snapshot.title
-      && state.artist === snapshot.artist;
+      && state.trackKey === nextTrackKey;
     state.connected = snapshot.connected;
     state.canSeek = snapshot.canSeek === true;
     state.source = snapshot.source;
@@ -983,9 +981,11 @@ async function pollMedia() {
     if (!wasConnected) state.activeIndex = Number.NaN;
     updateConnectionUi();
 
-    if (lyricSession.update(snapshot)) {
-      state.lyricOffsetMs = state.offsets[state.trackKey] ?? state.offsets[legacyTrackKey(snapshot)]
+    if (nextTrackKey !== state.trackKey) {
+      state.lyricOffsetMs = state.offsets[nextTrackKey] ?? state.offsets[legacyTrackKey(snapshot)]
         ?? state.offsets[matchingLegacyKeys(state.offsets, snapshot)[0]] ?? 0;
+    }
+    if (lyricSession.update(snapshot)) {
       elements.candidateBrowser.replaceChildren();
       elements.candidateBrowser.classList.remove("is-visible");
       document.querySelector("#song-link-input").value = "";

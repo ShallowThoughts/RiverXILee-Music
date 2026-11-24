@@ -6,6 +6,11 @@ function clampPosition(positionMs, durationMs) {
   return Math.max(0, Math.min(durationMs > 0 ? durationMs : Infinity, positionMs));
 }
 
+export async function readPlaybackSample(read, monotonic = () => performance.now(), wallClock = () => Date.now()) {
+  const snapshot = await read();
+  return { snapshot, receivedAt: monotonic(), receivedAtEpoch: wallClock() };
+}
+
 // SMTC Position belongs to LastUpdatedTime, not to the time we poll it.
 export function playbackAnchor(snapshot, receivedAt, receivedAtEpoch) {
   const rate = playbackRate(snapshot.playbackRate);
@@ -40,6 +45,7 @@ export function reconcilePlaybackAnchor(current, snapshot, receivedAt, receivedA
   const currentPosition = playbackPosition(current, receivedAt);
   const driftMs = target.positionMs - currentPosition;
   const stateChanged = current.isPlaying !== target.isPlaying
+    || playbackRate(current.playbackRate) !== target.playbackRate
     || Math.abs((current.durationMs ?? 0) - target.durationMs) > 1_000;
   const shouldSnap = stateChanged || Math.abs(driftMs) >= 1_500;
   const correction = shouldSnap ? driftMs : Math.max(-120, Math.min(120, driftMs));

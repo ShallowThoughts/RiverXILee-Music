@@ -112,13 +112,22 @@ pub(super) async fn first_available(
     primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
     secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,
 ) -> Result<LyricsResult, String> {
-    preferred_with_grace(primary, secondary, Duration::from_secs(4)).await
+    preferred_with_grace(primary, secondary, Some(Duration::from_secs(4))).await
+}
+
+// The native lookup is already bounded by the caller. Keep a ready backup,
+// but never let its response time decide which recording's lyrics are used.
+pub(super) async fn prefer_native(
+    primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
+    secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,
+) -> Result<LyricsResult, String> {
+    preferred_with_grace(primary, secondary, None).await
 }
 
 async fn preferred_with_grace(
     primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
     secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,
-    grace: Duration,
+    grace: Option<Duration>,
 ) -> Result<LyricsResult, String> {
     let mut primary = pin!(primary);
     let mut secondary = pin!(secondary);
@@ -131,10 +140,14 @@ async fn preferred_with_grace(
     let first_error = match first {
         Ok(Some(result)) if primary_finished => return Ok(result),
         Ok(Some(fallback)) => {
-            return match tokio::time::timeout(grace, primary.as_mut()).await {
-                Ok(Ok(Some(preferred))) => Ok(preferred),
-                _ => Ok(fallback),
+            let preferred = match grace {
+                Some(grace) => tokio::time::timeout(grace, primary.as_mut()).await.ok(),
+                None => Some(primary.as_mut().await),
             };
+            return Ok(match preferred {
+                Some(Ok(Some(result))) => result,
+                _ => fallback,
+            });
         }
         result => result.err(),
     };
@@ -172,7 +185,7 @@ pub(super) fn make_result(
         matched_title,
         matched_artist,
         instrumental,
-        match_revision: 2,
+        match_revision: 4,
         translation_lrc,
         translation_revision: 1,
     }
@@ -297,7 +310,7 @@ mod tests {
                 preferred_with_grace(
                     std::future::pending(),
                     async { Ok(Some(lyrics("netease:42"))) },
-                    Duration::from_millis(20),
+                    Some(Duration::from_millis(20)),
                 ),
             )
             .await
@@ -353,10 +366,28 @@ mod tests {
                 Ok(Some(lyrics("qq:preferred")))
             },
             async { Ok(Some(lyrics("netease:faster"))) },
-            Duration::from_millis(50),
+            Some(Duration::from_millis(50)),
         ))
         .unwrap();
         assert_eq!(result.song_mid, "qq:preferred");
+    }
+
+    #[test]
+    fn qq_native_priority_waits_for_the_bounded_query_even_when_backup_is_ready() {
+        let result = tauri::async_runtime::block_on(prefer_native(
+            async {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(Some(lyrics("qq:preferred")))
+            },
+            async { Ok(Some(lyrics("netease:fast"))) },
+        )).unwrap();
+        assert_eq!(result.song_mid, "qq:preferred");
+
+        let result = tauri::async_runtime::block_on(prefer_native(
+            async { Ok(None) },
+            async { Ok(Some(lyrics("netease:verified"))) },
+        )).unwrap();
+        assert_eq!(result.song_mid, "netease:verified");
     }
 
     #[test]

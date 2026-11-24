@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate as flush } from "node:timers/promises";
 import { createLyricSession, legacyTrackKey, lyricTrackKey } from "../src/lyric-session.js";
+import { LYRIC_MATCH_REVISION, QQ_LYRIC_MATCH_REVISION } from "../src/lyric-cache.js";
 
 const track = (title, extra = {}) => ({ connected: true, source: "cloudmusic.exe", title, artist: "歌手", album: "专辑", durationMs: 180000, ...extra });
 const result = (text) => ({ lrc: `[00:00.00]${text}\n[00:10.00]下一句`, songMid: "netease:42" });
@@ -30,7 +31,7 @@ test("bilingual mode refreshes legacy QQ null translations but reuses the upgrad
   let calls = 0;
   const { state, session } = harness(() => {
     calls++;
-    return { ...result("Hello"), songMid: "002sXtHN37Aqki", translationLrc: "[00:00.00]你好", translationRevision: 1 };
+    return { ...result("Hello"), songMid: "002sXtHN37Aqki", translationLrc: "[00:00.00]你好", translationRevision: 1, matchRevision: QQ_LYRIC_MATCH_REVISION };
   });
   state.display = { translationMode: "bilingual" };
   const song = track("翻译歌曲", { source: "QQMusic.exe" });
@@ -44,6 +45,19 @@ test("bilingual mode refreshes legacy QQ null translations but reuses the upgrad
   assert.equal(state.lyricFromCache, true);
 });
 
+test("a QQ song rechecks its own catalog on replay after a NetEase fallback", async () => {
+  let calls = 0;
+  const song = track("测试歌曲", { source: "QQMusic.exe" });
+  const { state, session } = harness(() => ({ ...result(++calls === 1 ? "临时歌词" : "QQ 原版"),
+    songMid: calls === 1 ? "netease:42" : "002sXtHN37Aqki", matchRevision: QQ_LYRIC_MATCH_REVISION }));
+  session.update(song); await flush();
+  assert.equal(state.lines[0].text, "临时歌词");
+  session.update({ connected: false });
+  session.update(song); await flush();
+  assert.equal(state.lines[0].text, "QQ 原版");
+  assert.equal(calls, 2);
+});
+
 test("a late ID or a changing duration does not restart a successful load", async () => {
   let calls = 0;
   const { state, session } = harness(() => { calls += 1; return result("正常歌词"); });
@@ -52,6 +66,38 @@ test("a late ID or a changing duration does not restart a successful load", asyn
   session.update(track("新歌", { trackId: "", durationMs: 180000 })); await flush();
   assert.equal(calls, 1);
   assert.equal(state.lyricStatus, "ready");
+});
+
+test("a late native NetEase ID replaces a successful but different automatic match", async () => {
+  const ids = [];
+  const { state, session } = harness((song) => {
+    ids.push(song.trackId || "");
+    return { ...result(song.trackId ? "当前歌曲" : "搜索补位"), songMid: `netease:${song.trackId || "99"}` };
+  });
+  session.update(track("新歌")); await flush();
+  session.update(track("新歌", { trackId: "42" })); await flush();
+  assert.deepEqual(ids, ["", "42"]);
+  assert.equal(state.lines[0].text, "当前歌曲");
+  session.update(track("新歌", { trackId: "42" })); await flush();
+  assert.equal(ids.length, 2);
+});
+
+test("native ID enrichment cancels stale automatic lookup but not a manual binding", async () => {
+  let resolveOld;
+  const { state, session } = harness((song) => song.trackId
+    ? { ...result("原生 ID"), songMid: `netease:${song.trackId}` }
+    : new Promise(resolve => { resolveOld = resolve; }));
+  session.update(track("新歌")); await flush();
+  session.update(track("新歌", { trackId: "42" })); await flush();
+  resolveOld(result("过期搜索")); await flush();
+  assert.equal(state.lines[0].text, "原生 ID");
+
+  let resolveManual;
+  const manual = session.bind(() => new Promise(resolve => { resolveManual = resolve; })); await flush();
+  session.update(track("新歌", { trackId: "43" })); await flush();
+  resolveManual(result("我的选择")); await manual;
+  assert.equal(state.lines[0].text, "我的选择");
+  assert.equal(state.lyricMatch.manuallySelected, true);
 });
 
 test("online failure keeps retrying after the old three-attempt limit and recovers", async () => {
@@ -118,7 +164,7 @@ test("switching songs while importing never binds the file to the next song", as
 
 test("confirmed instrumentals stop automatic searches and their negative cache is reusable", async () => {
   let calls = 0;
-  const { state, session, advance } = harness(() => { calls++; return { lrc: "", instrumental: true, matchedTitle: "曲目", matchRevision: 2 }; });
+  const { state, session, advance } = harness(() => { calls++; return { lrc: "", instrumental: true, matchedTitle: "曲目", matchRevision: LYRIC_MATCH_REVISION }; });
   session.update(track("曲目")); await flush();
   assert.equal(state.lyricStatus, "instrumental");
   assert.equal(state.lines.length, 0);

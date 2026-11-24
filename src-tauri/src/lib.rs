@@ -452,6 +452,7 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
         session.SourceAppUserModelId().ok().is_some_and(|source| needs_netease_clock(&source.to_string()))
     });
     if !has_netease_session && (preferred_source.is_none() || preferred_netease)
+        && !session.as_ref().is_some_and(session_is_playing)
         && netease_track.as_ref().is_some_and(|track| track.is_playing)
     {
         return Ok(netease_media_snapshot(
@@ -491,6 +492,7 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
         .await
         .map_err(error_text)?;
     let timeline = session.GetTimelineProperties().map_err(error_text)?;
+    let mut captured_at_ms = now_ms();
     let playback = session.GetPlaybackInfo().map_err(error_text)?;
     let artist = properties.Artist().map_err(error_text)?.to_string();
     let album_artist = properties.AlbumArtist().map_err(error_text)?.to_string();
@@ -505,6 +507,7 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
         && let Some(netease_position_ms) = netease::current_position_ms()
     {
         position_ms = netease_position_ms;
+        captured_at_ms = now_ms();
         timeline_updated_at_ms = i64::try_from(captured_at_ms).ok();
     }
 
@@ -743,28 +746,61 @@ fn netease_artist(candidate: &Value) -> String {
         .unwrap_or_default()
 }
 
+fn qq_title_without_single_label(title: &str) -> &str {
+    let title = title.trim();
+    title.rsplit_once(['(', '（']).and_then(|(base, suffix)| {
+        let label = suffix.strip_suffix([')', '）'])?;
+        label.trim().eq_ignore_ascii_case("Single Version").then_some(base.trim_end())
+    }).unwrap_or(title)
+}
+
+fn qq_automatic_candidate_score(candidate: &Value, title: &str, artist: &str, album: &str, duration_ms: i64) -> i64 {
+    let found_title = candidate["songname"].as_str().unwrap_or_default();
+    let tags = lyric_matching::version_tags(title);
+    let same_title = normalize(qq_title_without_single_label(title)) == normalize(qq_title_without_single_label(found_title));
+    if !same_title
+        && (tags.is_empty() || tags != lyric_matching::version_tags(found_title)
+            || normalize(&title_without_bracketed_qualifiers(title)) != normalize(&title_without_bracketed_qualifiers(found_title)))
+    {
+        return -1;
+    }
+    let artist_key = normalize(artist);
+    if !artist_key.is_empty() {
+        let singers: Vec<_> = candidate["singer"].as_array().into_iter().flatten()
+            .filter_map(|singer| singer["name"].as_str()).collect();
+        if !lyric_matching::artists_match(artist, &singers) { return -1; }
+    }
+    let score = candidate_score(candidate, if same_title { found_title } else { title }, "", album, duration_ms);
+    if score < 0 { return score; }
+    let score = score + if artist_key.is_empty() { 0 } else { 90 };
+    let found_duration = candidate["interval"].as_i64().unwrap_or(0).saturating_mul(1_000);
+    if duration_ms <= 0 { return score; }
+    if found_duration <= 0 { return score - 55; }
+    score - (duration_ms.abs_diff(found_duration) / 250) as i64
+}
+
 fn netease_candidate_score(candidate: &Value, title: &str, artist: &str, duration_ms: i64) -> i64 {
     if lyric_matching::version_tags(title) != lyric_matching::version_tags(candidate["name"].as_str().unwrap_or_default()) { return -1; }
-    let wanted_title = normalize(title);
-    let found_title = normalize(candidate["name"].as_str().unwrap_or_default());
+    let wanted_title = normalize(qq_title_without_single_label(title));
+    let found_title = normalize(qq_title_without_single_label(candidate["name"].as_str().unwrap_or_default()));
     let wanted_artist = normalize(artist);
-    let found_artist = normalize(&netease_artist(candidate));
+    let artists = candidate["artists"].as_array().or_else(|| candidate["ar"].as_array());
+    let names: Vec<_> = artists.into_iter().flatten().filter_map(|artist| artist["name"].as_str()).collect();
     let mut score = 0;
 
     if wanted_title.is_empty() || found_title.is_empty() {
         return -1;
     }
-    if found_title == wanted_title {
+    let alias_matches = ["alias", "alia"].iter().any(|field| candidate[*field].as_array()
+        .is_some_and(|aliases| aliases.iter().filter_map(Value::as_str)
+            .any(|alias| normalize(qq_title_without_single_label(alias)) == wanted_title)));
+    if found_title == wanted_title || alias_matches {
         score += 220;
-    } else if found_title.contains(&wanted_title) || wanted_title.contains(&found_title) {
-        score += 110;
     } else {
         return -1;
     }
     if !wanted_artist.is_empty() {
-        if found_artist.is_empty()
-            || !(found_artist.contains(&wanted_artist) || wanted_artist.contains(&found_artist))
-        {
+        if !lyric_matching::artists_match(artist, &names) {
             return -1;
         }
         score += 90;
@@ -785,7 +821,20 @@ fn netease_candidate_score(candidate: &Value, title: &str, artist: &str, duratio
             score -= 50;
         }
     }
+    // Within an accepted duration range, prefer the closest recording rather
+    // than whichever equally-scored result happened to be listed first.
+    if duration_ms > 0 && found_duration > 0 { score -= (duration_ms.abs_diff(found_duration) / 250) as i64; }
     score
+}
+
+fn cross_catalog_recording_matches(candidate: &Value, title: &str, artist: &str, duration_ms: i64) -> bool {
+    let found_title = candidate["name"].as_str().unwrap_or_default();
+    let found_duration = candidate["duration"].as_i64().or_else(|| candidate["dt"].as_i64()).unwrap_or(0);
+    let artist = normalize(artist);
+    !artist.is_empty()
+        && normalize(&netease_artist(candidate)) == artist
+        && normalize(found_title) == normalize(title)
+        && duration_ms > 0 && found_duration > 0 && duration_ms.abs_diff(found_duration) <= 2_500
 }
 
 async fn search_netease_songs(client: &reqwest::Client, query: &str, limit: &str) -> Result<Vec<Value>, String> {
@@ -843,6 +892,7 @@ async fn fetch_netease_lyrics(
     artist: &str,
     duration_ms: i64,
     track_id: &str,
+    strict_fallback: bool,
 ) -> Result<Option<LyricsResult>, String> {
     if !track_id.is_empty()
         && track_id.chars().all(|character| character.is_ascii_digit())
@@ -857,6 +907,7 @@ async fn fetch_netease_lyrics(
         let candidates = search_netease_songs(client, &query, "10").await?;
         let mut ranked = candidates
             .iter()
+            .filter(|item| !strict_fallback || cross_catalog_recording_matches(item, title, artist, duration_ms))
             .map(|item| {
                 (
                     netease_candidate_score(item, title, artist, duration_ms),
@@ -875,6 +926,7 @@ async fn fetch_netease_lyrics(
                 continue;
             }
             if let Some(lrc) = fetch_netease_lrc(client, &candidate_id).await? {
+                if strict_fallback && matches!(&lrc, lyric_lookup::LyricBody::Instrumental) { continue; }
                 return Ok(Some(lyric_lookup::make_result(lrc, format!("netease:{candidate_id}"),
                     candidate["name"].as_str().unwrap_or(title).to_string(), netease_artist(candidate))));
             }
@@ -1080,7 +1132,7 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 
 #[tauri::command]
 async fn check_for_update() -> Result<UpdateInfo, String> {
-    let current_version = "1.2.0.0".to_string();
+    let current_version = "1.2.0.1".to_string();
     let release = updater::fetch_release().await?;
     let latest_version = release["tag_name"]
         .as_str()
@@ -1187,6 +1239,7 @@ async fn fetch_lyrics_inner(
     }
     let client = lyrics_http_client();
     let is_netease = source.to_ascii_lowercase().contains("cloudmusic");
+    let is_qq = qq_transport::is_qq(&source);
     // Prefer an exact native ID, but do not let a stalled native endpoint consume
     // the whole lookup deadline or block the other catalog.
     if is_netease && !track_id.is_empty() && track_id.chars().all(|c| c.is_ascii_digit()) {
@@ -1194,17 +1247,22 @@ async fn fetch_lyrics_inner(
             return Ok(lyric_lookup::make_result(lrc, format!("netease:{track_id}"), title, artist));
         }
     }
-    let netease = lyric_lookup::bounded("网易云音乐", fetch_netease_lyrics(client, &title, &artist, duration_ms, ""));
-    let qq = lyric_lookup::bounded("QQ 音乐", fetch_qq_lyrics(client, &title, &artist, &album, duration_ms));
+    let netease = lyric_lookup::bounded("网易云音乐", async {
+        if is_qq && (normalize(&artist).is_empty() || duration_ms <= 0) { return Ok(None); }
+        fetch_netease_lyrics(client, &title, &artist, duration_ms, if is_netease { &track_id } else { "" }, is_qq).await
+    });
+    let qq = lyric_lookup::bounded("QQ 音乐", fetch_qq_lyrics(client, &title, &artist, &album, duration_ms, is_qq));
     if is_netease {
-        lyric_lookup::first_available(netease, qq).await
+        lyric_lookup::prefer_native(netease, qq).await
+    } else if is_qq {
+        lyric_lookup::prefer_native(qq, netease).await
     } else {
         lyric_lookup::first_available(qq, netease).await
     }
 }
 
 async fn fetch_qq_lyrics(
-    client: &reqwest::Client, title: &str, artist: &str, album: &str, duration_ms: i64,
+    client: &reqwest::Client, title: &str, artist: &str, album: &str, duration_ms: i64, strict_native: bool,
 ) -> Result<Option<LyricsResult>, String> {
     let mut tried_song_mids = HashSet::new();
     for query in lyric_search_queries(title, artist) {
@@ -1213,7 +1271,8 @@ async fn fetch_qq_lyrics(
             .iter()
             .map(|item| {
                 (
-                    candidate_score(item, title, artist, album, duration_ms),
+                    if strict_native { qq_automatic_candidate_score(item, title, artist, album, duration_ms) }
+                    else { candidate_score(item, title, artist, album, duration_ms) },
                     item,
                 )
             })
@@ -1273,6 +1332,32 @@ mod tests {
     }
 
     #[test]
+    fn qq_automatic_lookup_rejects_title_and_artist_substring_collisions() {
+        let score = |name: &str, singer: &str, interval: i64| {
+            let item = serde_json::json!({"songname": name, "singer": [{"name": singer}], "interval": interval});
+            super::qq_automatic_candidate_score(&item, "雨", "安", "", 180_000)
+        };
+        assert!(score("雨后的故事", "安", 180) < 0);
+        assert!(score("雨", "安然", 180) < 0);
+        assert!(score("雨", "安", 180) > score("雨", "安", 182));
+
+        let qq = serde_json::json!({"songname": "Supernova", "singer": [{"name": "aespa (에스파)"}], "interval": 178});
+        assert!(super::qq_automatic_candidate_score(&qq, "Supernova (Single Version)", "aespa", "", 178_000) >= 220);
+        assert!(super::qq_automatic_candidate_score(&qq, "Supernova (Live)", "aespa", "", 178_000) < 0);
+    }
+
+    #[test]
+    fn qq_cross_catalog_backup_requires_title_artist_and_duration() {
+        let item = serde_json::json!({"name": "Supernova", "artists": [{"name": "aespa"}], "duration": 178_300});
+        assert!(super::cross_catalog_recording_matches(&item, "SUPERNOVA", "aespa", 178_000));
+        for (title, artist, duration) in [("Supernova (Live)", "aespa", 178_000), ("Super", "aespa", 178_000),
+            ("Supernova", "", 178_000), ("Supernova", "aes", 178_000), ("Supernova", "aespa", 175_000),
+            ("Supernova", "aespa", 0)] {
+            assert!(!super::cross_catalog_recording_matches(&item, title, artist, duration));
+        }
+    }
+
+    #[test]
     fn explicit_instrumental_version_does_not_query_catalogs() {
         let result = tauri::async_runtime::block_on(super::fetch_lyrics_inner(
             "曲目（伴奏）".into(), "歌手".into(), "专辑".into(), 180000, "QQMusic.exe".into(), "".into())).unwrap();
@@ -1297,6 +1382,33 @@ mod tests {
         let snapshot = tauri::async_runtime::block_on(super::get_media_snapshot(None)).unwrap();
         println!("seek capability: connected={} source={} can_seek={} duration_ms={}",
             snapshot.connected, snapshot.source, snapshot.can_seek, snapshot.duration_ms);
+    }
+
+    #[test]
+    #[ignore = "read-only live QQ playback snapshots and public lyrics lookup; play the song first"]
+    fn live_current_qq_track_and_lyrics() {
+        use sha2::{Digest, Sha256};
+        tauri::async_runtime::block_on(async {
+            let first = super::get_media_snapshot(None).await.unwrap();
+            println!("snapshot: {}", serde_json::to_string(&first).unwrap());
+            assert!(first.connected && super::qq_transport::is_qq(&first.source) && !first.title.trim().is_empty(),
+                "QQ Music is not reporting the current track");
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+            let second = super::get_media_snapshot(Some(first.source.clone())).await.unwrap();
+            println!("snapshot: {}", serde_json::to_string(&second).unwrap());
+            assert!(second.connected && first.title == second.title && first.artist == second.artist && first.album == second.album,
+                "QQ Music changed tracks while sampling playback");
+            let track = if second.duration_ms > 0 { second } else { first };
+            let matched = super::fetch_lyrics(track.title, track.artist, track.album, track.duration_ms, track.source, track.track_id)
+                .await.expect("the current track should resolve to lyrics");
+            println!("match: {}", serde_json::json!({"songMid": matched.song_mid,
+                "title": matched.matched_title, "artist": matched.matched_artist,
+                "instrumental": matched.instrumental, "timed": super::lyric_lookup::has_timed_text(&matched.lrc),
+                "timedLineCount": matched.lrc.lines().filter(|line| super::lyric_lookup::has_timed_text(line)).count(),
+                "lyricSha256": format!("{:x}", Sha256::digest(matched.lrc.replace('\r', "").trim().as_bytes())),
+                "hasTranslation": matched.translation_lrc.is_some()}));
+            assert!(matched.instrumental || super::lyric_lookup::has_timed_text(&matched.lrc));
+        });
     }
 
     #[test]
@@ -1332,6 +1444,7 @@ mod tests {
             "QQMusic.exe".into(), String::new())).expect("automatic lookup should return timed lyrics");
         assert!(!result.instrumental);
         assert!(super::lyric_lookup::has_timed_text(&result.lrc));
+        assert!(!result.song_mid.starts_with("netease:"), "QQ has the native recording for this song");
         println!("QQ automatic smoke: provider={}, timed_bytes={}", result.song_mid, result.lrc.len());
     }
 
@@ -1412,6 +1525,23 @@ mod tests {
     }
 
     #[test]
+    fn netease_matching_accepts_full_artist_aliases_and_ranks_nearest_duration() {
+        let song = serde_json::json!({"name": "Supernova", "artists": [{"name": "aespa (에스파)"}], "duration": 178000});
+        assert!(super::netease_candidate_score(&song, "Supernova (Single Version)", "aespa", 178000) >= 220);
+        assert!(super::netease_candidate_score(&song, "Supernova", "에스파", 178000) >= 220);
+        assert!(super::netease_candidate_score(&song, "Supernova", "aes", 178000) < 0);
+        assert!(super::netease_candidate_score(&song, "Super", "aespa", 178000) < 0);
+        assert!(super::netease_candidate_score(&song, "Supernova (Live)", "aespa", 178000) < 0);
+        let mut other = song.clone(); other["duration"] = serde_json::json!(180000);
+        assert!(super::netease_candidate_score(&song, "Supernova", "aespa", 178000)
+            > super::netease_candidate_score(&other, "Supernova", "aespa", 178000));
+        let duet = serde_json::json!({"name": "APT.", "artists": [{"name":"ROSÉ"},{"name":"Bruno Mars"}], "duration":169000});
+        assert!(super::netease_candidate_score(&duet, "APT.", "Bruno Mars / ROSÉ", 169000) >= 220);
+        let translated = serde_json::json!({"name": "原名", "alia": ["Translated Title"], "artists": [{"name":"歌手"}], "duration":180000});
+        assert!(super::netease_candidate_score(&translated, "Translated Title", "歌手", 180000) >= 220);
+    }
+
+    #[test]
     fn builds_progressively_simpler_multilingual_search_queries() {
         assert_eq!(
             super::lyric_search_queries("涉川·剧情版 (Single Version)", "蔡明希-不才"),
@@ -1476,7 +1606,7 @@ mod tests {
                         .is_some(),
                     "direct lyric lookup failed for {expected_id}"
                 );
-                let result = super::fetch_netease_lyrics(&client, title, artist, duration_ms, "")
+                let result = super::fetch_netease_lyrics(&client, title, artist, duration_ms, "", false)
                     .await
                     .expect("NetEase search request should succeed")
                     .unwrap_or_else(|| panic!("failed to resolve {title} - {artist}"));
@@ -1529,6 +1659,7 @@ mod tests {
                     artist,
                     album,
                     duration_ms,
+                    true,
                 )
                 .await
                 .unwrap_or_else(|error| panic!("failed to resolve {title} - {artist}: {error}"))

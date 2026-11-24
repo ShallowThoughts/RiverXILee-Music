@@ -40,6 +40,8 @@ export function cachedLyricsFor(cache, track) {
 export function createLyricSession({ state, request, notify, save, now = () => performance.now(), timeoutMs = 28_000 }) {
   let snapshot = null;
   let controller = null;
+  let requestTrackId = "";
+  let manualInFlight = false;
 
   function invalidate() {
     state.fetchToken += 1;
@@ -54,6 +56,8 @@ export function createLyricSession({ state, request, notify, save, now = () => p
     const key = state.trackKey;
     const track = { ...snapshot };
     const manual = Boolean(manualRequest);
+    requestTrackId = track.trackId || "";
+    manualInFlight = manual;
     const retained = manual && (state.lines.length || state.lyricStatus === "instrumental")
       ? { lines: state.lines, match: state.lyricMatch, status: state.lyricStatus } : null;
     state.lyricAttempts += 1;
@@ -116,7 +120,7 @@ export function createLyricSession({ state, request, notify, save, now = () => p
     } finally {
       clearTimeout(timer);
       if (abortHandler) currentController.signal.removeEventListener("abort", abortHandler);
-      if (controller === currentController) controller = null;
+      if (controller === currentController) { controller = null; manualInFlight = false; }
     }
   }
 
@@ -138,6 +142,14 @@ export function createLyricSession({ state, request, notify, save, now = () => p
       notify();
       if (key) void load();
       return true;
+    }
+    const nativeId = sourceKey(track.source) === "cloudmusic" && /^\d+$/.test(track.trackId || "") ? track.trackId : "";
+    if (key && nativeId && !manualInFlight && !state.lyricMatch?.manuallySelected
+        && state.lyricMatch?.songMid !== `netease:${nativeId}`
+        && state.lyricMatch?.songMid !== "metadata:instrumental"
+        && nativeId !== requestTrackId) {
+      void load({ force: true });
+      return false;
     }
     if (key && ["error", "recovering"].includes(state.lyricStatus) && (enriched || now() >= state.lyricRetryAt)) void load();
     return false;

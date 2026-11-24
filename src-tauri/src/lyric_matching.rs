@@ -1,5 +1,38 @@
 use std::collections::BTreeSet;
 
+fn artist_key(value: &str) -> String {
+    value.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn artist_aliases(value: &str) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::from([artist_key(value)]);
+    let mut base = String::new();
+    let mut alias = String::new();
+    let mut depth = 0;
+    for c in value.chars() {
+        if matches!(c, '(' | '（') { depth += 1; }
+        else if matches!(c, ')' | '）') {
+            depth = (depth - 1).max(0);
+            if depth == 0 { aliases.insert(artist_key(&alias)); alias.clear(); }
+        } else if depth == 0 { base.push(c); }
+        else { alias.push(c); }
+    }
+    aliases.insert(artist_key(&base));
+    aliases.remove("");
+    aliases
+}
+
+pub(super) fn artists_match(wanted: &str, names: &[&str]) -> bool {
+    if wanted.trim().is_empty() { return true; }
+    let aliases: Vec<_> = names.iter().map(|name| artist_aliases(name)).collect();
+    let full = artist_key(wanted);
+    if aliases.iter().any(|names| names.contains(&full)) { return true; }
+    // Compare complete singer tokens, not arbitrary substrings such as 安 / 安然.
+    let wanted: Vec<_> = wanted.split(['/', '&', ',', '，', '、', ';', '；'])
+        .map(str::trim).filter(|name| !name.is_empty()).map(artist_aliases).collect();
+    !wanted.is_empty() && wanted.iter().all(|name| aliases.iter().any(|aliases| !aliases.is_disjoint(name)))
+}
+
 // Only qualifiers, not an arbitrary substring such as "Live Forever", define a recording version.
 pub(super) fn version_tags(title: &str) -> BTreeSet<&'static str> {
     let mut qualifiers = String::new();
@@ -63,5 +96,16 @@ mod tests {
         assert!(instrumental_title("歌曲 (Instrumental)"));
         assert!(instrumental_title("歌曲（伴奏）"));
         assert!(!instrumental_title("Instrumental Love"));
+    }
+
+    #[test]
+    fn artist_matching_accepts_aliases_and_reordered_collaborators_not_prefixes() {
+        assert!(artists_match("aespa", &["aespa (에스파)"]));
+        assert!(artists_match("에스파", &["aespa (에스파)"]));
+        assert!(artists_match("Bruno Mars / ROSÉ", &["ROSÉ", "Bruno Mars"]));
+        assert!(artists_match("AC/DC", &["AC/DC"]));
+        assert!(!artists_match("安", &["安然"]));
+        assert!(!artists_match("ROSÉ / Someone Else", &["ROSÉ", "Bruno Mars"]));
+        assert!(!artists_match("Alkam / Ami (아미)", &["Ami (아미)"]));
     }
 }

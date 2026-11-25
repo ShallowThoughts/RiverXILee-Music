@@ -8,6 +8,7 @@ function formatMilliseconds(milliseconds) {
 export function lyricProvider(match) {
   const id = String(match?.songMid ?? "").toLowerCase();
   if (id.startsWith("netease:")) return "网易云音乐";
+  if (id.startsWith("kugou:")) return "酷狗音乐";
   if (id.startsWith("qq:") || /^[a-z0-9]{8,32}$/i.test(id)) return "QQ 音乐";
   if (id.startsWith("local:")) return "本地歌词文件";
   if (id === "manual:instrumental") return "手动标记纯音乐";

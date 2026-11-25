@@ -1,6 +1,8 @@
 use super::LyricsResult;
 use serde_json::Value;
-use std::{future::Future, pin::pin, time::Duration};
+use std::{future::Future, time::Duration};
+#[cfg(test)]
+use std::pin::pin;
 
 pub(super) async fn json(
     request: reqwest::RequestBuilder,
@@ -108,6 +110,7 @@ pub(super) async fn bounded<T>(
         .map_err(|_| format!("{provider}歌词查询超时，请稍后重试或指定歌词"))?
 }
 
+#[cfg(test)]
 pub(super) async fn first_available(
     primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
     secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,
@@ -117,6 +120,7 @@ pub(super) async fn first_available(
 
 // The native lookup is already bounded by the caller. Keep a ready backup,
 // but never let its response time decide which recording's lyrics are used.
+#[cfg(test)]
 pub(super) async fn prefer_native(
     primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
     secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,
@@ -124,6 +128,7 @@ pub(super) async fn prefer_native(
     preferred_with_grace(primary, secondary, None).await
 }
 
+#[cfg(test)]
 async fn preferred_with_grace(
     primary: impl Future<Output = Result<Option<LyricsResult>, String>>,
     secondary: impl Future<Output = Result<Option<LyricsResult>, String>>,

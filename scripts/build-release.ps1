@@ -50,7 +50,7 @@ try {
     New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
     Copy-Item -LiteralPath $installerBinary -Destination $releaseInstaller -Force
 
-    & (Join-Path $PSScriptRoot "package-folder.ps1") -OutputDirectory $releaseDirectory -SkipBuild
+    & (Join-Path $PSScriptRoot "package-folder.ps1") -OutputDirectory $releaseDirectory -SkipBuild -ChangelogPath (Join-Path $projectRoot "docs\CHANGELOG_NEXT.md")
     Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $releaseDirectory "LICENSE")
     Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.txt") -Destination (Join-Path $releaseDirectory "THIRD_PARTY_NOTICES.txt")
     $checksums = @($releaseInstaller, (Join-Path $releaseDirectory "RiverXILee-Desktop-Lyrics_${releaseVersion}_x64-folder.zip"), (Join-Path $releaseDirectory "LICENSE"), (Join-Path $releaseDirectory "THIRD_PARTY_NOTICES.txt")) | ForEach-Object {

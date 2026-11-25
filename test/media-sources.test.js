@@ -4,6 +4,15 @@ import { musicSourceKey, platformName, resolvePreferredSource } from "../src/med
 import { cachedLyricsFor, lyricTrackKey, matchingLegacyKeys } from "../src/lyric-session.js";
 import { buildDiagnosticReport, lyricProvider } from "../src/diagnostics.js";
 
+test("KuGou source aliases share recording identity and report the native lyric provider", () => {
+  for (const source of ["kugou","KuGou.exe","C:\\Program Files\\KuGou\\KGMusic\\KuGou.exe"]) {
+    assert.equal(musicSourceKey(source),"kugou"); assert.equal(platformName(source),"酷狗音乐");
+    assert.equal(resolvePreferredSource(source,[{source:"kugou"}]),"kugou");
+  }
+  assert.equal(lyricProvider({songMid:`kugou:${"a".repeat(32)}`}),"酷狗音乐");
+});
+
+
 test("Qishui names and the SodaMusic session are one platform without accepting generic soda apps", () => {
   for (const source of ["SodaMusic.exe", "SODAMUSIC.EXE", "ByteDance.SodaMusic_123!App", "QishuiMusic.exe", "汽水音乐.exe"]) {
     assert.equal(musicSourceKey(source), "qishuimusic");

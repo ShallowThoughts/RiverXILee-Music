@@ -2,6 +2,9 @@ import "@phosphor-icons/web/regular";
 import "@phosphor-icons/web/fill";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { createNeteaseConfirmation } from "./netease-confirmation.js";
+import { requireEnhancementConsent } from "./enhancement-startup.js";
+import { NEXT_CHANGELOG } from "./changelog.js";
+import { createReleaseNotes, shouldShowReleaseNotes } from "./release-notes.js";
 import "./netease-confirmation.css";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -51,6 +54,48 @@ const IS_GLASS_PREVIEW = import.meta.env.VITE_LIQUID_GLASS_PREVIEW === "1"
   || (!IS_TAURI && new URLSearchParams(location.search).get("glass") === "1");
 // Stable and isolated preview share the approved material; isolation remains separate.
 document.body.classList.add("glass-preview");
+const neteaseConfirmation = createNeteaseConfirmation();
+let enhancementBusy = false;
+let enhancementRecoveryBusy = false;
+let startupRecoveryRequested = false;
+let mainStarted = false;
+let startupGatePromise = Promise.resolve(true);
+function enhancementConfirmationChannel() {
+  return new Channel(async (request) => {
+    const accepted = await neteaseConfirmation.show(request);
+    try { await invoke("answer_netease_control_confirmation", { id: request.id, accepted }); }
+    catch { neteaseConfirmation.cancel(); }
+  });
+}
+async function recoverEnhancements() {
+  if (enhancementRecoveryBusy) return;
+  enhancementRecoveryBusy = true;
+  startupRecoveryRequested = true;
+  neteaseConfirmation.cancel();
+  await startupGatePromise;
+  let retry = false;
+  try {
+    const restored = await invoke("recover_default_enhancements", { confirmation: enhancementConfirmationChannel() });
+    if (restored || !mainStarted) await invoke("exit_startup_application");
+  } catch (error) {
+    retry = await neteaseConfirmation.show({ stage: "startup-recovery-error", message: `${String(error?.message || error)}\n\n请保留原文件备份，按提示处理后重试。退出应用本身不会关闭播放器端口。` });
+    if (!retry) await invoke("exit_startup_application");
+  } finally { enhancementRecoveryBusy = false; startupRecoveryRequested = false; }
+  if (retry) await recoverEnhancements();
+}
+if (IS_TAURI) {
+  await listen("restore-enhancements-requested", recoverEnhancements);
+  const cleanupStartupGlass = initLiquidGlass([neteaseConfirmation.dialog]);
+  startupGatePromise = requireEnhancementConsent({
+    read: () => invoke("enhancement_startup_gate"),
+    confirm: () => invoke("confirm_enhancement_startup", { confirmation: enhancementConfirmationChannel() }),
+    quit: () => startupRecoveryRequested ? Promise.resolve() : invoke("exit_startup_application"),
+  });
+  const approved = await startupGatePromise;
+  if (!approved) await new Promise(() => {}); // Never initialize the main UI after dismissal.
+  cleanupStartupGlass();
+}
+mainStarted = true;
 const DISPLAY_SETTINGS_KEY = "riverxilee-desktop-lyrics.display.v1";
 const SHORTCUTS_KEY = "riverxilee-desktop-lyrics.shortcuts.v1";
 const PLAYER_KEY = "riverxilee-desktop-lyrics.player.v1";
@@ -59,6 +104,7 @@ const LYRICS_CACHE_KEY = "riverxilee-desktop-lyrics.cache.v1";
 const DISPLAY_PROFILES_KEY = "riverxilee-desktop-lyrics.profiles.v1";
 const MELODY_KEY = "riverxilee-desktop-lyrics.melody.v1";
 const ONBOARDING_KEY = "riverxilee-desktop-lyrics.onboarding.v1";
+const CHANGELOG_SEEN_KEY = "riverxilee-desktop-lyrics.changelog-seen.v1";
 const PREVIEW_LRC = [
   "让音乐，留在看得见的地方",
   "每一句，都有自然的呼吸",
@@ -145,6 +191,7 @@ const state = {
   displayProfiles: sanitizeDisplayProfiles(loadJson(DISPLAY_PROFILES_KEY, "displayProfiles", [])),
   discoveredMelody: loadJson(MELODY_KEY, "discoveredMelody", false) === true,
   onboardingDismissed: loadJson(ONBOARDING_KEY, "onboardingDismissed", false) === true,
+  lastSeenChangelogVersion: loadJson(CHANGELOG_SEEN_KEY, "lastSeenChangelogVersion", ""),
 };
 
 let preferenceSaveQueue = Promise.resolve();
@@ -160,6 +207,7 @@ function persistNativePreferences() {
     displayProfiles: state.displayProfiles,
     discoveredMelody: state.discoveredMelody,
     onboardingDismissed: state.onboardingDismissed,
+    lastSeenChangelogVersion: state.lastSeenChangelogVersion,
   };
   preferenceSaveQueue = preferenceSaveQueue
     .catch(() => {})
@@ -404,10 +452,12 @@ document.querySelector("#app").innerHTML = `
             <select id="player-source-select"><option value="">自动选择正在播放的平台</option></select>
           </label>
           <div class="sync-row">
-            <div class="sync-copy"><strong>网易云进度增强控制</strong><span id="netease-control-status" role="status">默认关闭 · 开启前需两次确认并重启网易云</span></div>
-            <button class="text-button" id="netease-control-button" type="button">临时启用</button>
+            <div class="sync-copy"><strong>网易云增强状态</strong><span id="netease-control-status" role="status">首次同意后默认启用 · 等待检测播放器</span></div>
           </div>
-          <p class="setting-help">仅限本次运行，不修改客户端文件。开启会开放本机调试端口，存在本机访问风险；退出桌面歌词不会关闭端口，需恢复普通模式或完全退出网易云后正常重开。</p>
+          <div class="sync-row">
+            <div class="sync-copy"><strong>酷狗增强状态</strong><span id="kugou-control-status" role="status">首次同意后默认启用 · 等待检测兼容状态</span></div>
+          </div>
+          <p class="setting-help">增强由首次使用确认统一授权，不再需要手动开启。酷狗只使用酷狗歌词，不支持进度拖拽。退出桌面歌词不会关闭播放器端口或恢复酷狗文件；撤回授权请使用托盘菜单「关闭增强并恢复」。</p>
           <div class="sync-row">
             <div class="sync-copy"><strong>本歌曲时间偏移</strong><span id="offset-status">0.0 秒</span></div>
             <div class="stepper" aria-label="歌词时间偏移">
@@ -421,7 +471,7 @@ document.querySelector("#app").innerHTML = `
             <button class="text-button" id="resync-button" type="button">立即同步</button>
           </div>
           <div class="sync-row">
-            <div class="sync-copy"><strong>歌词版本不正确？</strong><span>查看网易云和 QQ 音乐的候选版本</span></div>
+            <div class="sync-copy"><strong>歌词版本不正确？</strong><span>只查看当前播放器本平台的候选版本，不跨平台取词</span></div>
             <button class="text-button" id="find-version-button" type="button">手动选择</button>
           </div>
           <div class="candidate-browser" id="candidate-browser" aria-live="polite"></div>
@@ -461,6 +511,7 @@ document.querySelector("#app").innerHTML = `
           <button class="text-button" id="feedback-button" type="button">问题反馈</button>
           <button class="text-button" id="update-check-button" type="button">检查更新</button>
           <button class="text-button" id="onboarding-replay-button" type="button">新手引导</button>
+          <button class="text-button" id="changelog-button" type="button">更新日志</button>
         </div>
       </section>
 
@@ -1327,53 +1378,22 @@ document.querySelector("#reset-window-button").addEventListener("click", async (
   }
 });
 
-const neteaseControlButton = document.querySelector("#netease-control-button");
-const neteaseConfirmation = createNeteaseConfirmation();
 const neteaseControlStatus = document.querySelector("#netease-control-status");
-let neteaseNeedsRestart = false;
-let neteaseControlBusy = false;
-function paintNeteaseControl(status) {
-  neteaseNeedsRestart = status.needsRestart;
-  neteaseControlButton.textContent = status.needsRestart ? "关闭并恢复普通模式" : "临时启用";
-  neteaseControlStatus.textContent = status.enabled
-    ? "本次已启用 · 退出桌面歌词不会关闭网易云调试端口"
-    : status.needsRestart ? "尚未就绪 · 请恢复普通模式后重试" : "默认关闭 · 开启前需两次确认并重启网易云";
-}
-async function refreshNeteaseControl() {
-  if (!IS_TAURI || neteaseControlBusy) return;
-  try { paintNeteaseControl(await invoke("netease_control_status")); }
-  catch { neteaseControlStatus.textContent = "暂时无法读取增强控制状态，请稍后重试"; }
-}
-neteaseControlButton.disabled = !IS_TAURI;
-neteaseControlButton.addEventListener("click", async () => {
-  if (!IS_TAURI || neteaseControlBusy) return;
-  neteaseControlBusy = true;
-  neteaseControlButton.disabled = true;
-  neteaseControlStatus.textContent = "等待确认或重启网易云，请稍候…";
-  const confirmation = new Channel(async (request) => {
-    const accepted = await neteaseConfirmation.show(request);
-    try { await invoke("answer_netease_control_confirmation", { id: request.id, accepted }); }
-    catch { showToast("确认已失效，本次操作已取消，请重试"); }
-  });
+const kugouControlStatus = document.querySelector("#kugou-control-status");
+async function refreshDefaultEnhancements() {
+  if (!IS_TAURI || enhancementBusy || enhancementRecoveryBusy) return;
+  enhancementBusy = true;
   try {
-    paintNeteaseControl(await invoke("configure_netease_control", { enable: !neteaseNeedsRestart, confirmation }));
-    await pollMedia();
+    const status = await invoke("maintain_default_enhancements");
+    neteaseControlStatus.textContent = status.netease;
+    kugouControlStatus.textContent = status.kugou;
   } catch (error) {
-    await refreshNeteaseControlAfterError();
-    neteaseControlStatus.textContent = String(error);
-    showToast("网易云增强控制未完成，请查看播放与同步中的说明");
-  } finally {
-    neteaseConfirmation.cancel();
-    neteaseControlBusy = false;
-    neteaseControlButton.disabled = false;
-    neteaseControlButton.focus({ preventScroll: true });
-  }
-});
-async function refreshNeteaseControlAfterError() {
-  try { paintNeteaseControl(await invoke("netease_control_status")); } catch { /* Keep the last known restore action. */ }
+    const message = String(error?.message || error).replace(/^Error: /, "");
+    neteaseControlStatus.textContent = message;
+    kugouControlStatus.textContent = "可从托盘「关闭增强并恢复」检查，不会自动放宽校验";
+  } finally { enhancementBusy = false; }
 }
-refreshNeteaseControl();
-elements.settings.addEventListener("click", refreshNeteaseControl);
+elements.settings.addEventListener("click", refreshDefaultEnhancements);
 
 elements.playerSource.addEventListener("change", () => {
   state.preferredSource = elements.playerSource.value;
@@ -1409,6 +1429,7 @@ async function chooseLyricsCandidate(candidate, button, trackKey) {
       id: candidate.id,
       title: candidate.title,
       artist: candidate.artist,
+      source: state.source,
     }));
     if (!applied) {
       if (trackKey === state.trackKey) showToast(state.lyricMessage || "歌词选择未完成", 4_000);
@@ -1442,6 +1463,7 @@ document.querySelector("#find-version-button").addEventListener("click", async (
       artist: state.artist,
       album: state.album,
       durationMs: state.durationMs,
+      source: state.source,
     });
     if (trackKey !== state.trackKey) return;
     elements.candidateBrowser.replaceChildren();
@@ -1461,14 +1483,14 @@ document.querySelector("#find-version-button").addEventListener("click", async (
       detail.textContent = `${candidate.artist || "未知歌手"} · ${candidateDuration(candidate.durationMs)}`;
       const provider = document.createElement("span");
       provider.className = "candidate-provider";
-      provider.textContent = candidate.provider === "netease" ? "网易云" : "QQ 音乐";
+      provider.textContent = ({ netease: "网易云", qq: "QQ 音乐", kugou: "酷狗音乐" })[candidate.provider] || "未知来源";
       copy.append(title, detail);
       item.append(copy, provider);
       item.addEventListener("click", () => chooseLyricsCandidate(candidate, item, trackKey));
       elements.candidateBrowser.append(item);
     }
-  } catch {
-    if (trackKey === state.trackKey) elements.candidateBrowser.textContent = "搜索失败，请检查网络后重试";
+  } catch (error) {
+    if (trackKey === state.trackKey) elements.candidateBrowser.textContent = String(error?.message || error).replace(/^Error: /, "");
   } finally {
     button.disabled = false;
     button.textContent = "手动选择";
@@ -1490,7 +1512,7 @@ document.querySelector("#song-link-button").addEventListener("click", async (eve
     const artist = state.artist;
     button.disabled = true;
     button.textContent = "获取中…";
-    const applied = await lyricSession.bind(() => invoke("fetch_lyrics_candidate", { ...candidate, title, artist }));
+    const applied = await lyricSession.bind(() => invoke("fetch_lyrics_candidate", { ...candidate, title, artist, source: state.source }));
     if (key === state.trackKey) showToast(applied ? "指定歌词已绑定到当前歌曲" : state.lyricMessage || "未能获取指定歌词", 4_000);
   } catch (error) { showToast(error.message, 4_000); }
   finally { button.disabled = false; button.textContent = "获取并绑定"; }
@@ -1793,6 +1815,8 @@ if (IS_TAURI) {
     showToast("RiverXILee桌面歌词已经在运行", 3_500);
   });
   registerShortcuts();
+  refreshDefaultEnhancements();
+  setInterval(refreshDefaultEnhancements, 6_000);
   pollMedia();
   refreshMediaSources();
   if (!IS_GLASS_PREVIEW) isAutostartEnabled().then((enabled) => { elements.autostart.checked = enabled; }).catch(() => {});
@@ -1853,16 +1877,30 @@ const onboarding = createOnboarding({
   },
 });
 document.querySelector("#onboarding-replay-button").addEventListener("click", () => onboarding.start());
-if (!state.onboardingDismissed) setTimeout(() => {
-  if (!state.onboardingDismissed && state.visible && !state.locked) onboarding.start();
-}, 3_000);
+const releaseNotes = createReleaseNotes();
+async function showCurrentReleaseNotes(automatic = false) {
+  if (automatic && !shouldShowReleaseNotes(state.lastSeenChangelogVersion, APP_VERSION)) return;
+  if (enhancementRecoveryBusy) return;
+  const shown = await releaseNotes.show(APP_VERSION, NEXT_CHANGELOG);
+  if (!shown) return;
+  if (!shouldShowReleaseNotes(state.lastSeenChangelogVersion, APP_VERSION)) return;
+  state.lastSeenChangelogVersion = APP_VERSION;
+  try { localStorage.setItem(CHANGELOG_SEEN_KEY, JSON.stringify(APP_VERSION)); } catch { /* Native preferences retain it. */ }
+  persistNativePreferences();
+}
+document.querySelector("#changelog-button").addEventListener("click", () => showCurrentReleaseNotes());
 
 const cleanupGlass = initLiquidGlass([
   document.querySelector("#control-bar"), elements.settingsPanel, elements.updateBanner, neteaseConfirmation.dialog,
-  elements.toast, document.querySelector("#font-picker-popup"), onboarding.card,
+  elements.toast, document.querySelector("#font-picker-popup"), onboarding.card, releaseNotes.dialog,
 ]);
 window.addEventListener("pagehide", cleanupGlass, { once: true });
 if (import.meta.hot) import.meta.hot.dispose(cleanupGlass);
+if (IS_TAURI) void showCurrentReleaseNotes(true).then(() => {
+  if (!state.onboardingDismissed) setTimeout(() => {
+    if (!state.onboardingDismissed && state.visible && !state.locked && !enhancementRecoveryBusy) onboarding.start();
+  }, 500);
+});
 
 if (IS_GLASS_PREVIEW) {
   elements.autostart.disabled = true;

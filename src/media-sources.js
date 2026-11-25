@@ -2,6 +2,7 @@ export function musicSourceKey(source = "") {
   const value = String(source).trim().toLowerCase();
   if (value.includes("cloudmusic")) return "cloudmusic";
   if (value.includes("qqmusic")) return "qqmusic";
+  if (value.includes("kugou")) return "kugou";
   if (value.includes("qishui") || value.includes("sodamusic") || value.includes("汽水音乐")) return "qishuimusic";
   return value;
 }
@@ -22,8 +23,9 @@ export function resolvePreferredSource(preferred, sessions) {
   if (!preferred) return "";
   const exact = sessions.find((item) => item.source.toLowerCase() === preferred.toLowerCase());
   if (exact) return exact.source;
-  if (musicSourceKey(preferred) === "qishuimusic") {
-    return sessions.find((item) => musicSourceKey(item.source) === "qishuimusic")?.source || preferred;
+  const key = musicSourceKey(preferred);
+  if (["qishuimusic", "kugou"].includes(key)) {
+    return sessions.find((item) => musicSourceKey(item.source) === key)?.source || preferred;
   }
   return preferred;
 }

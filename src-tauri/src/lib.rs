@@ -26,6 +26,11 @@ use windows::Media::MediaPlaybackType;
 mod fonts;
 mod lyric_lookup;
 mod lyric_matching;
+mod lyric_source;
+mod kugou_control;
+mod kugou_lyrics;
+mod kugou_patch;
+mod enhancement_startup;
 mod netease;
 mod netease_control;
 mod qq_transport;
@@ -113,6 +118,10 @@ fn watch_window_placement(window: &WebviewWindow) {
     let generation = Arc::new(AtomicU64::new(0));
     let observed_window = window.clone();
     window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::CloseRequested { .. }) && !enhancement_startup::authorized() {
+            observed_window.app_handle().exit(0);
+            return;
+        }
         if !matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_)) {
             return;
         }
@@ -293,7 +302,9 @@ fn source_is_qishui(source: &str) -> bool {
 }
 
 fn preferred_source_matches(source: &str, preferred: &str) -> bool {
-    source.eq_ignore_ascii_case(preferred) || (source_is_qishui(source) && source_is_qishui(preferred))
+    source.eq_ignore_ascii_case(preferred)
+        || (source.to_ascii_lowercase().contains("kugou") && preferred.to_ascii_lowercase().contains("kugou"))
+        || (source_is_qishui(source) && source_is_qishui(preferred))
 }
 
 fn source_is_supported_music_app(source: &str) -> bool {
@@ -429,12 +440,18 @@ async fn list_media_sessions() -> Result<Vec<MediaSessionInfo>, String> {
             });
         }
     }
+    if !result.iter().any(|s| s.source.to_ascii_lowercase().contains("kugou")) {
+        if let Some(track) = kugou_control::recent_track() { result.push(MediaSessionInfo { source: "kugou".into(), is_playing: track.playing }); }
+    }
     Ok(result)
 }
 
 #[tauri::command]
 async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSnapshot, String> {
     let captured_at_ms = now_ms();
+    let kugou_track = if preferred_source.as_deref().is_none_or(|s| s.to_ascii_lowercase().contains("kugou")) {
+        tauri::async_runtime::spawn_blocking(kugou_control::current_track).await.ok().flatten()
+    } else { None };
     let mut netease_track = netease::current_track();
     let preferred_netease = preferred_source
         .as_deref()
@@ -442,12 +459,20 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
     let session = match active_media_session(preferred_source.as_deref()).await {
         Ok(session) => session,
         Err(error) => {
+            if let Some(track) = kugou_track { return Ok(kugou_media_snapshot(track)); }
             if (preferred_source.is_none() || preferred_netease) && let Some(track) = netease_track {
                 return Ok(netease_media_snapshot(track, captured_at_ms).await);
             }
             return Err(error);
         }
     };
+    if let Some(track) = kugou_track {
+        let selected_kugou = session.as_ref().is_some_and(|s| s.SourceAppUserModelId().ok().is_some_and(|v| v.to_string().to_ascii_lowercase().contains("kugou")));
+        if selected_kugou || preferred_source.as_deref().is_some_and(|s| s.to_ascii_lowercase().contains("kugou"))
+            || !session.as_ref().is_some_and(session_is_playing) && track.playing {
+            return Ok(kugou_media_snapshot(track));
+        }
+    }
     let has_netease_session = session.as_ref().is_some_and(|session| {
         session.SourceAppUserModelId().ok().is_some_and(|source| needs_netease_clock(&source.to_string()))
     });
@@ -553,6 +578,13 @@ async fn get_media_snapshot(preferred_source: Option<String>) -> Result<MediaSna
     })
 }
 
+fn kugou_media_snapshot(track: kugou_control::Track) -> MediaSnapshot {
+    MediaSnapshot { connected: true, source: "kugou".into(), track_id: if track.hash.is_empty() { String::new() } else { format!("kugou:{}",track.hash) },
+        title: track.title, artist: track.artist, album: String::new(), is_playing: track.playing, can_seek: false,
+        playback_rate: 1.0, position_ms: track.position, duration_ms: track.duration,
+        timeline_updated_at_ms: i64::try_from(track.captured).ok(), captured_at_ms: track.captured }
+}
+
 #[tauri::command]
 async fn control_media(action: String, preferred_source: Option<String>) -> Result<bool, String> {
     let Some(session) = active_media_session(preferred_source.as_deref()).await? else {
@@ -608,6 +640,35 @@ async fn seek_media(position_ms: i64, source: String, title: String, artist: Str
 
 #[tauri::command]
 fn netease_control_status() -> netease_control::Status { netease_control::status() }
+
+#[tauri::command]
+fn enhancement_startup_gate() -> enhancement_startup::Gate { enhancement_startup::gate() }
+#[tauri::command]
+async fn confirm_enhancement_startup(window: WebviewWindow, confirmation: tauri::ipc::Channel<netease_control::ConfirmationRequest>) -> Result<enhancement_startup::Gate,String> {
+    let owner=window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || enhancement_startup::confirm(owner,confirmation)).await.map_err(error_text)?
+}
+#[tauri::command]
+async fn maintain_default_enhancements() -> Result<enhancement_startup::Status,String> {
+    tauri::async_runtime::spawn_blocking(enhancement_startup::maintain).await.map_err(error_text)?
+}
+#[tauri::command]
+async fn recover_default_enhancements(window:WebviewWindow,confirmation:tauri::ipc::Channel<netease_control::ConfirmationRequest>) -> Result<bool,String> {
+    let owner=window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || enhancement_startup::recover(owner,confirmation)).await.map_err(error_text)?
+}
+#[tauri::command]
+fn exit_startup_application(app:AppHandle) { app.exit(0); }
+
+#[tauri::command]
+async fn kugou_control_status() -> Result<kugou_control::Status, String> {
+    tauri::async_runtime::spawn_blocking(kugou_control::status).await.map_err(error_text)
+}
+#[tauri::command]
+async fn configure_kugou_control(window: WebviewWindow, enable: bool, confirmation: tauri::ipc::Channel<netease_control::ConfirmationRequest>) -> Result<kugou_control::Status, String> {
+    let owner = window.label().to_string();
+    tauri::async_runtime::spawn_blocking(move || kugou_control::configure(enable, owner, confirmation)).await.map_err(error_text)?
+}
 
 #[tauri::command]
 async fn configure_netease_control(window: WebviewWindow, enable: bool, confirmation: tauri::ipc::Channel<netease_control::ConfirmationRequest>) -> Result<netease_control::Status, String> {
@@ -758,7 +819,13 @@ fn qq_automatic_candidate_score(candidate: &Value, title: &str, artist: &str, al
     let found_title = candidate["songname"].as_str().unwrap_or_default();
     let tags = lyric_matching::version_tags(title);
     let same_title = normalize(qq_title_without_single_label(title)) == normalize(qq_title_without_single_label(found_title));
-    if !same_title
+    let found_duration = candidate["interval"].as_i64().unwrap_or(0).saturating_mul(1_000);
+    let album_evidence = !normalize(album).is_empty()
+        && normalize(album) == normalize(candidate["albumname"].as_str().unwrap_or_default())
+        && duration_ms > 0 && found_duration > 0 && duration_ms.abs_diff(found_duration) <= 2_500
+        && normalize(&title_without_bracketed_qualifiers(title)) == normalize(&title_without_bracketed_qualifiers(found_title))
+        && tags == lyric_matching::version_tags(found_title);
+    if !same_title && !album_evidence
         && (tags.is_empty() || tags != lyric_matching::version_tags(found_title)
             || normalize(&title_without_bracketed_qualifiers(title)) != normalize(&title_without_bracketed_qualifiers(found_title)))
     {
@@ -770,10 +837,9 @@ fn qq_automatic_candidate_score(candidate: &Value, title: &str, artist: &str, al
             .filter_map(|singer| singer["name"].as_str()).collect();
         if !lyric_matching::artists_match(artist, &singers) { return -1; }
     }
-    let score = candidate_score(candidate, if same_title { found_title } else { title }, "", album, duration_ms);
+    let score = candidate_score(candidate, if same_title || album_evidence { found_title } else { title }, "", album, duration_ms);
     if score < 0 { return score; }
     let score = score + if artist_key.is_empty() { 0 } else { 90 };
-    let found_duration = candidate["interval"].as_i64().unwrap_or(0).saturating_mul(1_000);
     if duration_ms <= 0 { return score; }
     if found_duration <= 0 { return score - 55; }
     score - (duration_ms.abs_diff(found_duration) / 250) as i64
@@ -1008,7 +1074,9 @@ async fn search_lyrics_candidates(
     artist: String,
     album: String,
     duration_ms: i64,
+    source: String,
 ) -> Result<Vec<LyricsCandidate>, String> {
+    let provider = lyric_source::provider(&source)?;
     if title.trim().is_empty() {
         return Err("当前歌曲没有可用于搜索的标题".to_string());
     }
@@ -1058,21 +1126,9 @@ async fn search_lyrics_candidates(
         }
         Ok::<_, String>(results)
     };
-    let (netease, qq) = futures_lite::future::zip(
-        lyric_lookup::bounded("网易云音乐", netease),
-        lyric_lookup::bounded("QQ 音乐", qq),
-    ).await;
-    let mut results = Vec::new();
-    let mut last_error = None;
-    for result in [netease, qq] {
-        match result {
-            Ok(mut candidates) => results.append(&mut candidates),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    if results.is_empty() && let Some(error) = last_error {
-        return Err(error);
-    }
+    let mut results = if provider == "kugou" { lyric_lookup::bounded("酷狗音乐", kugou_lyrics::candidates(client,&title,&artist,duration_ms)).await? }
+        else if provider == "qq" { lyric_lookup::bounded("QQ 音乐", qq).await? }
+        else { lyric_lookup::bounded("网易云音乐", netease).await? };
     results.sort_by_key(|candidate| std::cmp::Reverse(candidate.score));
     results.truncate(20);
     Ok(results)
@@ -1084,15 +1140,19 @@ async fn fetch_lyrics_candidate(
     id: String,
     title: String,
     artist: String,
+    source: String,
 ) -> Result<LyricsResult, String> {
+    lyric_source::ensure_provider(&source, &provider)?;
     if !(provider == "netease" && !id.is_empty() && id.len() <= 20 && id.chars().all(|character| character.is_ascii_digit())
-        || provider == "qq" && (8..=32).contains(&id.len()) && id.chars().all(|character| character.is_ascii_alphanumeric())) {
+        || provider == "qq" && (8..=32).contains(&id.len()) && id.chars().all(|character| character.is_ascii_alphanumeric())
+        || provider == "kugou" && kugou_lyrics::valid_hash(&id)) {
         return Err("歌曲标识无效".to_string());
     }
     let client = lyrics_http_client();
     let lrc = match provider.as_str() {
         "netease" => fetch_netease_lrc(client, &id).await,
         "qq" => fetch_qq_lrc(client, &id).await,
+        "kugou" => kugou_lyrics::by_hash(client,&id,&title,&artist,0).await,
         _ => return Err("不支持的歌词来源".to_string()),
     }
     ?
@@ -1132,7 +1192,7 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 
 #[tauri::command]
 async fn check_for_update() -> Result<UpdateInfo, String> {
-    let current_version = "1.2.0.1".to_string();
+    let current_version = "1.2.0.2".to_string();
     let release = updater::fetch_release().await?;
     let latest_version = release["tag_name"]
         .as_str()
@@ -1247,18 +1307,11 @@ async fn fetch_lyrics_inner(
             return Ok(lyric_lookup::make_result(lrc, format!("netease:{track_id}"), title, artist));
         }
     }
-    let netease = lyric_lookup::bounded("网易云音乐", async {
-        if is_qq && (normalize(&artist).is_empty() || duration_ms <= 0) { return Ok(None); }
-        fetch_netease_lyrics(client, &title, &artist, duration_ms, if is_netease { &track_id } else { "" }, is_qq).await
-    });
-    let qq = lyric_lookup::bounded("QQ 音乐", fetch_qq_lyrics(client, &title, &artist, &album, duration_ms, is_qq));
-    if is_netease {
-        lyric_lookup::prefer_native(netease, qq).await
-    } else if is_qq {
-        lyric_lookup::prefer_native(qq, netease).await
-    } else {
-        lyric_lookup::first_available(qq, netease).await
-    }
+    lyric_source::fetch(&source,
+        || fetch_qq_lyrics(client, &title, &artist, &album, duration_ms, is_qq),
+        || fetch_netease_lyrics(client, &title, &artist, duration_ms, &track_id, false),
+        || kugou_lyrics::fetch(client, &title, &artist, duration_ms, &track_id),
+    ).await
 }
 
 async fn fetch_qq_lyrics(
@@ -1344,6 +1397,13 @@ mod tests {
         let qq = serde_json::json!({"songname": "Supernova", "singer": [{"name": "aespa (에스파)"}], "interval": 178});
         assert!(super::qq_automatic_candidate_score(&qq, "Supernova (Single Version)", "aespa", "", 178_000) >= 220);
         assert!(super::qq_automatic_candidate_score(&qq, "Supernova (Live)", "aespa", "", 178_000) < 0);
+
+        let shifted = serde_json::json!({"songname":"无情画", "albumname":"无情画 (变调版)",
+            "singer":[{"name":"邶邶"}], "interval":202});
+        assert!(super::qq_automatic_candidate_score(&shifted, "无情画 (声调版)", "邶邶", "无情画 (变调版)", 202322) >= 220);
+        assert!(super::qq_automatic_candidate_score(&shifted, "无情画 (声调版)", "邶邶", "其他专辑", 202322) < 0);
+        assert!(super::qq_automatic_candidate_score(&shifted, "无情画 (声调版)", "邶邶", "无情画 (变调版)", 255000) < 0);
+        assert!(super::qq_automatic_candidate_score(&shifted, "无情画 (Live)", "邶邶", "无情画 (变调版)", 202322) < 0);
     }
 
     #[test]
@@ -1382,6 +1442,28 @@ mod tests {
         let snapshot = tauri::async_runtime::block_on(super::get_media_snapshot(None)).unwrap();
         println!("seek capability: connected={} source={} can_seek={} duration_ms={}",
             snapshot.connected, snapshot.source, snapshot.can_seek, snapshot.duration_ms);
+    }
+
+    #[test]
+    #[ignore = "read-only live KuGou media-session and clock probe; open and play a song first"]
+    fn live_kugou_session_probe() {
+        tauri::async_runtime::block_on(async {
+            let manager = super::media_manager().await.unwrap();
+            let sessions = manager.GetSessions().unwrap();
+            let mut source = None;
+            for index in 0..sessions.Size().unwrap() {
+                let session = sessions.GetAt(index).unwrap();
+                let id = session.SourceAppUserModelId().unwrap().to_string();
+                println!("media-session source: {id}");
+                if id.to_ascii_lowercase().contains("kugou") || id.contains("酷狗") { source = Some(id); }
+            }
+            let Some(source) = source else { println!("KuGou native SMTC session: absent"); return; };
+            let first = super::get_media_snapshot(Some(source.clone())).await.unwrap();
+            println!("kugou snapshot: {}", serde_json::to_string(&first).unwrap());
+            tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+            let second = super::get_media_snapshot(Some(source)).await.unwrap();
+            println!("kugou snapshot: {}", serde_json::to_string(&second).unwrap());
+        });
     }
 
     #[test]
@@ -1679,6 +1761,7 @@ mod tests {
                 "aespa".to_string(),
                 "Supernova".to_string(),
                 178_000,
+                "Tencent.QQMusic".to_string(),
             )
             .await
             .expect("candidate search should succeed");
@@ -1691,6 +1774,7 @@ mod tests {
                 candidate.id,
                 candidate.title,
                 candidate.artist,
+                "Tencent.QQMusic".to_string(),
             )
             .await
             .expect("selected candidate should have timed lyrics");
@@ -1760,6 +1844,7 @@ mod tests {
         assert!(!super::preferred_source_matches("QQMusic.exe", "QishuiMusic.exe"));
         assert!(!super::preferred_source_matches("soda-video.exe", "QishuiMusic.exe"));
     }
+
 
     #[test]
     #[ignore = "live automatic lyric lookup with SodaMusic metadata, not a running-client test"]
@@ -1966,6 +2051,11 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Ok(dir) = app.path().app_config_dir() {
+                fs::create_dir_all(&dir)?;
+                kugou_control::init(dir.join("kugou-compat"));
+                enhancement_startup::init(dir.join("default-enhancements-consent.json"));
+            }
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_placement(&window)?;
                 watch_window_placement(&window);
@@ -1975,6 +2065,7 @@ pub fn run() {
                 .text("toggle-lock", "锁定或解锁")
                 .text("resync", "重新同步")
                 .separator()
+                .text("restore-enhancements", "关闭增强并恢复")
                 .text("quit", "退出 RiverXILee桌面歌词")
                 .build()?;
             let mut tray = TrayIconBuilder::new()
@@ -1990,6 +2081,10 @@ pub fn run() {
                     }
                     "resync" => {
                         let _ = app.emit("global-shortcut", "resync");
+                    }
+                    "restore-enhancements" => {
+                        if let Some(window)=app.get_webview_window("main") { let _=window.show();let _=window.unminimize();let _=window.set_focus(); }
+                        let _=app.emit("restore-enhancements-requested",());
                     }
                     "quit" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -2012,6 +2107,13 @@ pub fn run() {
             control_media,
             seek_media,
             netease_control_status,
+            enhancement_startup_gate,
+            confirm_enhancement_startup,
+            maintain_default_enhancements,
+            recover_default_enhancements,
+            exit_startup_application,
+            kugou_control_status,
+            configure_kugou_control,
             configure_netease_control,
             answer_netease_control_confirmation,
             fetch_lyrics,

@@ -1,6 +1,7 @@
 import { parseLrc } from "./lyrics.js";
 import { musicSourceKey as sourceKey } from "./media-sources.js";
 import { usableLyricCache } from "./lyric-cache.js";
+import { lyricMatchesPlayer } from "./lyric-source.js";
 import { attachTranslations, needsTranslationRefresh } from "./translations.js";
 
 // IDs and durations can arrive after the title, or fluctuate between media readers.
@@ -85,6 +86,7 @@ export function createLyricSession({ state, request, notify, save, now = () => p
         }),
       ]);
       if (token !== state.fetchToken || key !== state.trackKey) return false;
+      if (!lyricMatchesPlayer(result, track)) throw new Error("歌词来源与当前播放器不一致，已阻止跨平台绑定；可导入本地歌词");
       const lines = result.instrumental ? [] : attachTranslations(parseLrc(result.lrc), result.translationLrc);
       if (!result.instrumental && !lines.length) throw new Error("歌词没有可用的时间标签，可尝试其他版本或导入 LRC");
       state.lines = lines;
@@ -106,14 +108,16 @@ export function createLyricSession({ state, request, notify, save, now = () => p
         state.lyricMatch = retained.match;
         state.lyricStatus = retained.status;
       } else {
-        const canRecoverQuietly = !manual && state.lyricAttempts === 1
+        const unsupportedSource = /自有在线歌词源|已阻止跨平台|歌词来源与当前播放器不一致/.test(state.lyricMessage);
+        const canRecoverQuietly = !unsupportedSource && !manual && state.lyricAttempts === 1
           && !/\b(?:429|502|503|504)\b|超时|限制访问|权限|没有可用的时间标签|两个歌词源均未找到/.test(state.lyricMessage);
         state.lyricStatus = canRecoverQuietly ? "recovering" : "error";
         const delays = /\b(?:429|502|503|504)\b/.test(state.lyricMessage)
           ? [30_000, 60_000, 120_000, 300_000] : /\b405\b/.test(state.lyricMessage)
             ? [10_000, 30_000, 60_000, 120_000] : [1_000, 2_500, 6_000, 15_000, 30_000, 60_000];
         const serverWait = Number(state.lyricMessage.match(/建议等待 (\d+) 秒/)?.[1] || 0) * 1000;
-        state.lyricRetryAt = now() + (canRecoverQuietly ? 650 : Math.max(serverWait, delays[Math.min(state.lyricAttempts - 1, delays.length - 1)]));
+        state.lyricRetryAt = unsupportedSource ? Infinity
+          : now() + (canRecoverQuietly ? 650 : Math.max(serverWait, delays[Math.min(state.lyricAttempts - 1, delays.length - 1)]));
       }
       notify();
       return false;
@@ -143,11 +147,12 @@ export function createLyricSession({ state, request, notify, save, now = () => p
       if (key) void load();
       return true;
     }
-    const nativeId = sourceKey(track.source) === "cloudmusic" && /^\d+$/.test(track.trackId || "") ? track.trackId : "";
+    const nativeId = sourceKey(track.source) === "cloudmusic" && /^\d+$/.test(track.trackId || "") ? `netease:${track.trackId}`
+      : sourceKey(track.source) === "kugou" && /^kugou:[a-f0-9]{32}$/i.test(track.trackId || "") ? track.trackId.toLowerCase() : "";
     if (key && nativeId && !manualInFlight && !state.lyricMatch?.manuallySelected
-        && state.lyricMatch?.songMid !== `netease:${nativeId}`
+        && state.lyricMatch?.songMid !== nativeId
         && state.lyricMatch?.songMid !== "metadata:instrumental"
-        && nativeId !== requestTrackId) {
+        && nativeId !== (sourceKey(track.source) === "cloudmusic" ? `netease:${requestTrackId}` : requestTrackId?.toLowerCase())) {
       void load({ force: true });
       return false;
     }

@@ -3,6 +3,7 @@ param(
     [switch]$SkipBuild,
     [string]$PackageName = "RiverXILee-Desktop-Lyrics",
     [string]$ReadmePath,
+    [string]$ChangelogPath,
     [string]$ExecutableName = "riverxilee-desktop-lyrics.exe"
 )
 
@@ -53,6 +54,9 @@ try {
     }
     Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $webPath "asset-manifest.json")
     Copy-Item -LiteralPath $ReadmePath -Destination (Join-Path $folderPath "README.md")
+    if ($ChangelogPath) {
+        Copy-Item -LiteralPath $ChangelogPath -Destination (Join-Path $folderPath "CHANGELOG_NEXT.md")
+    }
     Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $folderPath "LICENSE")
     Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD_PARTY_NOTICES.txt") -Destination (Join-Path $folderPath "THIRD_PARTY_NOTICES.txt")
 

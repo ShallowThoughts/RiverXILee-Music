@@ -6,8 +6,8 @@ const read = (path) => readFileSync(new URL("../" + path, import.meta.url), "utf
 const pkg = JSON.parse(read("package.json"));
 
 test("public four-part version and internal build versions stay aligned across application and installer", () => {
-  assert.equal(pkg.displayVersion, "1.2.0.1");
-  assert.equal(pkg.version, "1.2.1", "Cargo/Tauri uses the next three-part build version");
+  assert.equal(pkg.displayVersion, "1.2.0.2");
+  assert.equal(pkg.version, "1.2.2", "Cargo/Tauri uses the next three-part build version");
   for (const path of ["src-tauri/tauri.conf.json", "installer-ui/src-tauri/tauri.conf.json", "package-lock.json"]) {
     assert.equal(JSON.parse(read(path)).version, pkg.version, path);
   }

@@ -80,6 +80,10 @@ pub fn status() -> Status {
 pub fn can_seek() -> bool { status().enabled }
 
 fn confirm(owner: &str, channel: &tauri::ipc::Channel<ConfirmationRequest>, text: &str) -> bool {
+    let stage = if text == PURPOSE { "purpose" } else if text == RISK { "risk" } else { "restore" };
+    confirm_stage(owner, channel, stage, text)
+}
+pub(super) fn confirm_stage(owner: &str, channel: &tauri::ipc::Channel<ConfirmationRequest>, stage: &'static str, text: &str) -> bool {
     let id = CONFIRMATION_ID.fetch_add(1, Ordering::Relaxed);
     let (reply, receive) = mpsc::sync_channel(1);
     {
@@ -87,7 +91,6 @@ fn confirm(owner: &str, channel: &tauri::ipc::Channel<ConfirmationRequest>, text
         if pending.is_some() { return false; }
         *pending = Some(PendingConfirmation { id, owner: owner.into(), reply });
     }
-    let stage = if text == PURPOSE { "purpose" } else if text == RISK { "risk" } else { "restore" };
     let sent = channel.send(ConfirmationRequest { id, stage, message: text.into() }).is_ok();
     // No listener, expired dialog, destroyed window or missing reply all cancel, never approve.
     let accepted = sent && receive.recv_timeout(Duration::from_secs(120)).unwrap_or(false);
@@ -124,6 +127,10 @@ fn exit(p: &Process) -> Result<(), String> {
 // Check both families before every CDP connection, including rejected wildcard listeners.
 fn verify_listener(s: &Session) -> Result<(), String> {
     if !alive(&s.process) { return Err("网易云已重启，请重新启用增强控制".into()); }
+    verify_loopback_listener(s.port, s.process.pid)
+}
+
+pub(super) fn verify_loopback_listener(port_number: u16, owner_pid: u32) -> Result<(), String> {
     let mut owned = false;
     for family in [2u32, 23u32] {
         let mut bytes = 0;
@@ -144,16 +151,16 @@ fn verify_listener(s: &Session) -> Result<(), String> {
                 let r = std::ptr::read_unaligned(row.as_ptr().cast::<MIB_TCP6ROW_OWNER_PID>());
                 (r.dwLocalPort, r.dwOwningPid, Ipv6Addr::from(r.ucLocalAddr).is_loopback())
             }};
-            if u16::from_be(port as u16) != s.port { continue; }
-            if !local || pid != s.process.pid { return Err("调试端口并非网易云独占的本机回环端口，已拒绝连接".into()); }
+            if u16::from_be(port as u16) != port_number { continue; }
+            if !local || pid != owner_pid { return Err("调试端口并非目标播放器独占的本机回环端口，已拒绝连接".into()); }
             owned = true;
         }
     }
-    if !owned { return Err("网易云尚未提供本机调试端口".into()); }
+    if !owned { return Err("播放器尚未提供本机调试端口".into()); }
     Ok(())
 }
 
-fn websocket_path(url: &str, port: u16) -> Option<String> {
+pub(super) fn websocket_path(url: &str, port: u16) -> Option<String> {
     let url = reqwest::Url::parse(url).ok()?;
     (url.scheme() == "ws" && url.host_str() == Some("127.0.0.1") && url.port() == Some(port)
         && url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none()
@@ -166,18 +173,22 @@ impl HttpHandle {
 impl Drop for HttpHandle { fn drop(&mut self) { unsafe { let _ = WinHttpCloseHandle(self.0); } } }
 
 fn evaluate(s: &Session, path: &str, expression: &str) -> Result<Value, String> {
-    verify_listener(s)?;
+    evaluate_local(s.port, path, expression, false, || verify_listener(s))
+}
+
+pub(super) fn evaluate_local(port: u16, path: &str, expression: &str, await_promise: bool, verify: impl Fn() -> Result<(), String>) -> Result<Value, String> {
+    verify()?;
     unsafe {
         let agent = HttpHandle::checked(WinHttpOpen(w!("RiverXILee/1.2.0.0"), WINHTTP_ACCESS_TYPE_NO_PROXY, PCWSTR::null(), PCWSTR::null(), 0))?;
         WinHttpSetTimeouts(agent.0, 1500, 1500, 1500, 1500).map_err(|e| e.to_string())?;
-        let connection = HttpHandle::checked(WinHttpConnect(agent.0, w!("127.0.0.1"), s.port, 0))?;
+        let connection = HttpHandle::checked(WinHttpConnect(agent.0, w!("127.0.0.1"), port, 0))?;
         let object: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
         let request = HttpHandle::checked(WinHttpOpenRequest(connection.0, w!("GET"), PCWSTR(object.as_ptr()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), WINHTTP_OPEN_REQUEST_FLAGS(0)))?;
         WinHttpSetOption(Some(request.0), WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, None).map_err(|e| e.to_string())?;
         WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|e| e.to_string())?;
         WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|e| e.to_string())?;
         let socket = HttpHandle::checked(WinHttpWebSocketCompleteUpgrade(request.0, None))?;
-        let message = json!({"id":1,"method":"Runtime.evaluate","params":{"expression":expression,"returnByValue":true}}).to_string();
+        let message = json!({"id":1,"method":"Runtime.evaluate","params":{"expression":expression,"returnByValue":true,"awaitPromise":await_promise}}).to_string();
         if WinHttpWebSocketSend(socket.0, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE, Some(message.as_bytes())) != 0 { return Err("发送网易云进度操作失败".into()); }
         let mut data = Vec::new(); let until = Instant::now() + Duration::from_secs(3);
         while Instant::now() < until {
@@ -227,12 +238,26 @@ fn target(s: &Session) -> Result<String, String> {
 }
 
 pub fn configure(enable: bool, owner: String, channel: tauri::ipc::Channel<ConfirmationRequest>) -> Result<Status, String> {
+    configure_inner(enable, Some((&owner, &channel)))
+}
+// These entry points are not Tauri commands. The startup coordinator must hold
+// the user's versioned startup consent (or an explicit recovery confirmation).
+pub(super) fn auto_start() -> Result<Status, String> {
+    if !super::enhancement_startup::authorized() { return Err("首次使用确认尚未完成".into()); }
+    if can_seek() { return Ok(status()); }
+    configure_inner(true,None)
+}
+pub(super) fn running() -> bool { main_process().is_ok() }
+pub(super) fn restore_from_startup() -> Result<Status, String> { configure_inner(false,None) }
+fn configure_inner(enable: bool, consent: Option<(&str,&tauri::ipc::Channel<ConfirmationRequest>)>) -> Result<Status, String> {
     let mut control = state().try_lock().map_err(|_| "增强控制正在处理，请稍候")?;
     if control.as_ref().is_some_and(|s| !alive(&s.process)) { *control = None; }
     if enable {
         if control.is_some() { return Err("请先关闭并恢复普通模式，再重新启用".into()); }
         let old = main_process()?;
-        if !double_confirm(|text| confirm(&owner, &channel, text)) { return Ok(Status { enabled: false, needs_restart: false }); }
+        if let Some((owner,channel)) = consent {
+            if !double_confirm(|text| confirm(owner, channel, text)) { return Ok(Status { enabled: false, needs_restart: false }); }
+        }
         // OS chooses a free local port. It is revalidated against the process after launch.
         let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|_| "无法申请本机回环端口")?;
         let port = reservation.local_addr().map_err(|e| e.to_string())?.port();
@@ -263,7 +288,9 @@ pub fn configure(enable: bool, owner: String, channel: tauri::ipc::Channel<Confi
         Err(format!("{last}。临时启动参数可能不被此版本支持；未修改客户端文件。若网易云仍未恢复，请完全退出后正常重开。"))
     } else {
         if let Some(s) = control.clone() {
-            if !confirm(&owner, &channel, RESTORE) { return Ok(Status { enabled: s.ready, needs_restart: true }); }
+            if let Some((owner,channel)) = consent {
+                if !confirm(owner, channel, RESTORE) { return Ok(Status { enabled: s.ready, needs_restart: true }); }
+            }
             exit(&s.process)?;
             // Check that the owned process really exited before starting ordinary mode.
             start(&s.process.path, None)?;

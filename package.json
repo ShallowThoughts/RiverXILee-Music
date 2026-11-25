@@ -1,8 +1,8 @@
 {
   "name": "riverxilee-desktop-lyrics",
   "private": true,
-  "version": "1.2.1",
-  "displayVersion": "1.2.0.1",
+  "version": "1.2.2",
+  "displayVersion": "1.2.0.2",
   "license": "GPL-3.0-only",
   "author": "RiverXILee",
   "type": "module",

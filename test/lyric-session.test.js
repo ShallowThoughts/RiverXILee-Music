@@ -13,6 +13,18 @@ function harness(request, options = {}) {
   return { state, session, advance() { clock = state.lyricRetryAt + 1; } };
 }
 
+test("late KuGou recording hash replaces an automatic search match, but not a manual binding", async () => {
+  const a = `kugou:${"a".repeat(32)}`, b = `kugou:${"b".repeat(32)}`;
+  const calls = [];
+  const {state,session} = harness(song => {calls.push(song.trackId || "search"); return {...result("酷狗歌词"),songMid:song.trackId || a,matchRevision:LYRIC_MATCH_REVISION};});
+  const song = track("晴天",{source:"kugou",artist:"周杰伦",album:"",trackId:""});
+  session.update(song); await flush(); assert.equal(state.lyricMatch.songMid,a);
+  session.update({...song,trackId:b}); await flush(); assert.equal(state.lyricMatch.songMid,b);
+  session.update({...song,trackId:b}); await flush(); assert.deepEqual(calls,["search",b]);
+  await session.bind(async()=>({...result("手选酷狗"),songMid:a}));
+  session.update({...song,trackId:b}); await flush(); assert.equal(state.lyricMatch.songMid,a);
+});
+
 test("cold cache clears the previous song immediately and fetches the new lyrics", async () => {
   let resolveNew;
   const { state, session } = harness((song) => song.title === "上一首" ? result("旧歌词") : new Promise((resolve) => { resolveNew = resolve; }));
@@ -45,17 +57,32 @@ test("bilingual mode refreshes legacy QQ null translations but reuses the upgrad
   assert.equal(state.lyricFromCache, true);
 });
 
-test("a QQ song rechecks its own catalog on replay after a NetEase fallback", async () => {
+test("a QQ session rejects a foreign result and refreshes an old foreign binding", async () => {
   let calls = 0;
   const song = track("测试歌曲", { source: "QQMusic.exe" });
-  const { state, session } = harness(() => ({ ...result(++calls === 1 ? "临时歌词" : "QQ 原版"),
+  const { state, session } = harness(() => ({ ...result(++calls === 1 ? "跨平台结果" : "QQ 原版"),
     songMid: calls === 1 ? "netease:42" : "002sXtHN37Aqki", matchRevision: QQ_LYRIC_MATCH_REVISION }));
   session.update(song); await flush();
-  assert.equal(state.lines[0].text, "临时歌词");
+  assert.equal(state.lines.length, 0);
+  assert.match(state.lyricMessage, /已阻止跨平台/);
+  assert.equal(state.lyricRetryAt, Infinity);
+  state.lyricCache[lyricTrackKey(song)] = { ...result("旧手动绑定"), manuallySelected: true };
   session.update({ connected: false });
   session.update(song); await flush();
   assert.equal(state.lines[0].text, "QQ 原版");
   assert.equal(calls, 2);
+});
+
+test("unsupported native sources stay explicit without automatic foreign-source retries", async () => {
+  let calls = 0;
+  const { state, session } = harness(() => { calls++; throw new Error("当前播放器尚未接入自有在线歌词源，不会转用其他平台"); });
+  const song = track("测试歌曲", {source:"KuGou.exe"});
+  session.update(song); await flush();
+  for (let i=0;i<5;i++) session.update(song);
+  await flush();
+  assert.equal(calls, 1);
+  assert.equal(state.lyricStatus, "error");
+  assert.equal(state.lyricRetryAt, Infinity);
 });
 
 test("a late ID or a changing duration does not restart a successful load", async () => {
@@ -164,7 +191,7 @@ test("switching songs while importing never binds the file to the next song", as
 
 test("confirmed instrumentals stop automatic searches and their negative cache is reusable", async () => {
   let calls = 0;
-  const { state, session, advance } = harness(() => { calls++; return { lrc: "", instrumental: true, matchedTitle: "曲目", matchRevision: LYRIC_MATCH_REVISION }; });
+  const { state, session, advance } = harness(() => { calls++; return { lrc: "", songMid: "metadata:instrumental", instrumental: true, matchedTitle: "曲目", matchRevision: LYRIC_MATCH_REVISION }; });
   session.update(track("曲目")); await flush();
   assert.equal(state.lyricStatus, "instrumental");
   assert.equal(state.lines.length, 0);

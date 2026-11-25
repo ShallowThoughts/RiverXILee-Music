@@ -1,4 +1,5 @@
 import { musicSourceKey } from "./media-sources.js";
+import { lyricMatchesPlayer } from "./lyric-source.js";
 
 export const LYRIC_CACHE_LIMIT = 1000;
 export const LYRIC_MATCH_REVISION = 4;
@@ -12,7 +13,10 @@ export function pruneLyricCache(cache) {
 
 export function usableLyricCache(item, track, time = Date.now()) {
   if (!item) return false;
+  if (track.source && !lyricMatchesPlayer(item, track)) return false;
   if (item.manuallySelected) return true;
+  if (musicSourceKey(track.source) === "kugou" && /^kugou:[a-f0-9]{32}$/i.test(track.trackId || "")
+      && item.songMid?.toLowerCase() !== track.trackId.toLowerCase() && item.songMid !== "metadata:instrumental") return false;
   if (musicSourceKey(track.source) === "cloudmusic" && /^\d+$/.test(track.trackId || "")
       && item.songMid !== `netease:${track.trackId}` && item.songMid !== "metadata:instrumental") return false;
   if (musicSourceKey(track.source) === "qqmusic") {

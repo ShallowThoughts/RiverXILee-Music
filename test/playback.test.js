@@ -3,6 +3,14 @@ import assert from "node:assert/strict";
 import { playbackAnchor, playbackPosition, readPlaybackSample, reconcilePlaybackAnchor } from "../src/playback.js";
 
 const epoch = 1_780_000_000_000;
+test("ordinary KuGou metadata without a timeline never starts a synthetic lyric clock", () => {
+  const anchor = playbackAnchor({ source: "kugou", positionMs: 0, durationMs: 0, isPlaying: true, capturedAtMs: epoch }, 0, epoch+100);
+  assert.equal(playbackPosition(anchor, 100000), 0);
+  assert.equal(anchor.isPlaying, true);
+  assert.equal(anchor.timelineAvailable, false);
+  const enhanced = playbackAnchor({ source: "kugou", positionMs: 12000, durationMs: 269000, isPlaying: true, capturedAtMs: epoch }, 0, epoch+100);
+  assert.equal(playbackPosition(enhanced, 1000), 13100);
+});
 function snapshot(overrides = {}) {
   return {
     positionMs: 60_000,

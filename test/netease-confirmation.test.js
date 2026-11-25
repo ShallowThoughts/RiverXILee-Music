@@ -36,6 +36,14 @@ test("Escape, external close and cleanup cannot approve a request", async () => 
     exit(); assert.equal(await answer, false);
   }
 });
+test("startup risk dialog has an exit action and Escape/close never records approval",async()=>{
+  const ui=fixture();
+  for(const dismiss of [()=>ui.cancelButton.handlers.click(),()=>ui.dialog.handlers.cancel({preventDefault(){}}),()=>ui.dialog.close()]) {
+    const answer=ui.show({stage:"startup-enhancements",message:"默认增强与本机调试端口风险"});
+    assert.equal(ui.cancelButton.textContent,"退出应用");assert.equal(ui.acceptButton.textContent,"同意并进入");
+    dismiss();assert.equal(await answer,false);
+  }
+});
 test("a fresh dialog is needed for each approval; stale close events and duplicate requests cannot advance it", async () => {
   const ui = fixture();
   const first = ui.show({ stage: "purpose", message: "重启说明" });
